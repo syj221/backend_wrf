@@ -1,0 +1,70 @@
+{
+  "fingerprint": "2a95602e92d7eeef21340843576151ea7ac6c5088020f463767826c6ff5f634a",
+  "generated_at": "2026-07-21T06:21:48.946818Z",
+  "forecast_focus": "urban",
+  "physics": {
+    "preset": "城市精细预报",
+    "mp_physics": 8,
+    "bl_pbl_physics": 1,
+    "sf_sfclay_physics": 1,
+    "cu_physics": 3,
+    "cu_physics_by_domain": [
+      3,
+      0
+    ],
+    "ra_lw_physics": 4,
+    "ra_sw_physics": 4,
+    "sf_surface_physics": 2,
+    "sf_urban_physics": 0,
+    "sf_urban_physics_by_domain": [
+      0,
+      0
+    ],
+    "num_soil_layers": 4,
+    "num_land_cat": 21,
+    "radt": 5
+  },
+  "spinup": {
+    "mode": "custom",
+    "hours": 12
+  },
+  "assimilation_scheme": "fdda_standard",
+  "geography": {
+    "fingerprint": "6407c0941b4e529c22517506c24212b80f943290ced0ce41acf89481b468c446",
+    "source": "hpc_wps_geogrid",
+    "domains": [
+      {
+        "domain": "d01",
+        "terrain_mean_m": 622.717601,
+        "terrain_max_m": 2244.079,
+        "terrain_std_m": 581.116322,
+        "terrain_range_m": 2244.135191,
+        "land_fraction": 0.952759,
+        "water_fraction": 0.047241,
+        "urban_fraction": 0.036371
+      },
+      {
+        "domain": "d02",
+        "terrain_mean_m": 1098.221738,
+        "terrain_max_m": 2337.125,
+        "terrain_std_m": 299.451387,
+        "terrain_range_m": 1950.2307,
+        "land_fraction": 0.999786,
+        "water_fraction": 0.000214,
+        "urban_fraction": 0.084829
+      }
+    ],
+    "remote_cache": "~/WRFwork/backend_wrf_geo/6407c0941b4e529c22517506c24212b80f943290ced0ce41acf89481b468c446"
+  },
+  "confidence": 0.86,
+  "reasons": [
+    "积云参数按网格距逐域设置：≥10 km 使用参数化、3–10 km 使用尺度感知方案、≤3 km 关闭。",
+    "根据关注点、最细网格和 geogrid 地形统计，建议 12 小时 spin-up。",
+    "网格松弛仅建议用于 spin-up 的 ≥9 km 粗网格，且不松弛水汽和边界层。",
+    "geogrid 显示复杂地形，延长 spin-up 以减小初始调整噪声。",
+    "当前最内层城市比例不足 15%，未自动开启 UCM。"
+  ],
+  "warnings": [
+    "该方案是规则化起点，不代表对个例最优；正式业务应通过历史个例回报检验。"
+  ]
+}

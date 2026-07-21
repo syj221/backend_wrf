@@ -1,0 +1,926 @@
+{
+  "schema_version": "1.0",
+  "image_format": "webp",
+  "business_type": "WRF",
+  "task_id": "wrf_gfs_20260720T113510Z_7bb2c76c",
+  "data_source": "GFS",
+  "gfs_cycle": "2026071700",
+  "start_time": "2026-07-17T00:00:00Z",
+  "end_time": "2026-07-17T12:00:00Z",
+  "center": {
+    "lat": 39.454,
+    "lon": 114.92
+  },
+  "default_domain": "d01",
+  "default_variable": "T2",
+  "domains": [
+    {
+      "id": "d01",
+      "dx": 9000.0,
+      "dy": 9000.0,
+      "grid": [
+        91,
+        78
+      ],
+      "extent": [
+        109.9859619140625,
+        36.24785614013672,
+        119.85403442382812,
+        42.569087982177734
+      ],
+      "times": [
+        "2026-07-17T00:00:00Z",
+        "2026-07-17T01:00:00Z",
+        "2026-07-17T02:00:00Z",
+        "2026-07-17T03:00:00Z",
+        "2026-07-17T04:00:00Z",
+        "2026-07-17T05:00:00Z",
+        "2026-07-17T06:00:00Z",
+        "2026-07-17T07:00:00Z",
+        "2026-07-17T08:00:00Z",
+        "2026-07-17T09:00:00Z",
+        "2026-07-17T10:00:00Z",
+        "2026-07-17T11:00:00Z",
+        "2026-07-17T12:00:00Z"
+      ],
+      "variables": [
+        {
+          "name": "T2",
+          "label": "2 米温度",
+          "units": "K",
+          "description": "TEMP at 2 M",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717000000.webp",
+              "min": 285.514892578125,
+              "max": 301.4972229003906,
+              "mean": 293.6198425937888,
+              "display_min": 287.77799926757814,
+              "display_max": 298.9905816650391
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717010000.webp",
+              "min": 286.0008850097656,
+              "max": 303.7337341308594,
+              "mean": 295.36706652175076,
+              "display_min": 289.4625469970703,
+              "display_max": 300.5824621582031
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717020000.webp",
+              "min": 286.7962646484375,
+              "max": 304.6880798339844,
+              "mean": 296.28274399409935,
+              "display_min": 290.3331945800781,
+              "display_max": 301.88039062499996
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717030000.webp",
+              "min": 286.9388732910156,
+              "max": 305.3897399902344,
+              "mean": 297.3126652541044,
+              "display_min": 291.5710321044922,
+              "display_max": 302.8508758544922
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717040000.webp",
+              "min": 287.78387451171875,
+              "max": 306.11737060546875,
+              "mean": 298.3136501231641,
+              "display_min": 292.7871423339844,
+              "display_max": 303.65779968261717
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717050000.webp",
+              "min": 288.7770690917969,
+              "max": 306.77838134765625,
+              "mean": 299.2190360990703,
+              "display_min": 293.5390515136719,
+              "display_max": 304.3325164794922
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717060000.webp",
+              "min": 289.5030517578125,
+              "max": 307.3004455566406,
+              "mean": 299.94748868966445,
+              "display_min": 293.96081970214846,
+              "display_max": 304.87909423828125
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717070000.webp",
+              "min": 290.0264587402344,
+              "max": 307.5848693847656,
+              "mean": 300.2962961720896,
+              "display_min": 294.0674969482422,
+              "display_max": 305.1839935302734
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717080000.webp",
+              "min": 290.3559875488281,
+              "max": 307.7202453613281,
+              "mean": 300.38533899689367,
+              "display_min": 294.25028625488284,
+              "display_max": 305.3998736572266
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717090000.webp",
+              "min": 290.3896789550781,
+              "max": 307.5551452636719,
+              "mean": 300.1872282138372,
+              "display_min": 294.1144104003906,
+              "display_max": 305.39967651367186
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717100000.webp",
+              "min": 290.1579895019531,
+              "max": 307.055908203125,
+              "mean": 299.61939317967125,
+              "display_min": 293.2710528564453,
+              "display_max": 304.98948852539064
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717110000.webp",
+              "min": 288.96759033203125,
+              "max": 306.2756652832031,
+              "mean": 298.3796770617672,
+              "display_min": 292.00660400390626,
+              "display_max": 303.85493530273436
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/T2/20260717120000.webp",
+              "min": 284.4650573730469,
+              "max": 305.44989013671875,
+              "mean": 296.2898146693019,
+              "display_min": 290.10801025390623,
+              "display_max": 301.60013488769533
+            }
+          ]
+        },
+        {
+          "name": "U10",
+          "label": "10 米 U 风",
+          "units": "m s-1",
+          "description": "U at 10 M",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717000000.webp",
+              "min": -6.615832328796387,
+              "max": 10.489075660705566,
+              "mean": 0.9060214760467393,
+              "display_min": -4.712004518508911,
+              "display_max": 6.538155508041381
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717010000.webp",
+              "min": -5.968655586242676,
+              "max": 9.772913932800293,
+              "mean": 1.0479326486320735,
+              "display_min": -4.001830101013184,
+              "display_max": 5.427843685150146
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717020000.webp",
+              "min": -5.447468280792236,
+              "max": 8.506102561950684,
+              "mean": 1.1820284426591545,
+              "display_min": -3.6515311002731323,
+              "display_max": 5.57240496635437
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717030000.webp",
+              "min": -5.121529579162598,
+              "max": 7.473384857177734,
+              "mean": 1.1677164220497096,
+              "display_min": -3.924603581428528,
+              "display_max": 5.85777802467346
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717040000.webp",
+              "min": -6.154037952423096,
+              "max": 8.659789085388184,
+              "mean": 1.038730896578305,
+              "display_min": -4.506942701339722,
+              "display_max": 6.105437307357787
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717050000.webp",
+              "min": -6.407797813415527,
+              "max": 9.835575103759766,
+              "mean": 0.9281633173772845,
+              "display_min": -4.945071783065796,
+              "display_max": 6.793712062835681
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717060000.webp",
+              "min": -7.087274074554443,
+              "max": 10.949052810668945,
+              "mean": 0.8724464984536806,
+              "display_min": -5.237682991027832,
+              "display_max": 7.499498777389525
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717070000.webp",
+              "min": -7.463386535644531,
+              "max": 10.428984642028809,
+              "mean": 0.8127876089400037,
+              "display_min": -5.4372531700134275,
+              "display_max": 7.917054977416989
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717080000.webp",
+              "min": -6.563136577606201,
+              "max": 10.198372840881348,
+              "mean": 0.7271470737809651,
+              "display_min": -5.241147375106811,
+              "display_max": 7.9801605129241935
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717090000.webp",
+              "min": -7.114472389221191,
+              "max": 10.506699562072754,
+              "mean": 0.6223848495282098,
+              "display_min": -4.936659097671509,
+              "display_max": 7.803610715866086
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717100000.webp",
+              "min": -7.322640895843506,
+              "max": 9.173312187194824,
+              "mean": 0.46761521386810373,
+              "display_min": -4.492394104003906,
+              "display_max": 7.369388532638537
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717110000.webp",
+              "min": -8.570063591003418,
+              "max": 8.763795852661133,
+              "mean": 0.24990138174701074,
+              "display_min": -3.5859752893447876,
+              "display_max": 6.755739936828613
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/U10/20260717120000.webp",
+              "min": -9.779142379760742,
+              "max": 7.598150730133057,
+              "mean": -0.02383618591829078,
+              "display_min": -3.4532142210006715,
+              "display_max": 4.735716361999511
+            }
+          ]
+        },
+        {
+          "name": "V10",
+          "label": "10 米 V 风",
+          "units": "m s-1",
+          "description": "V at 10 M",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717000000.webp",
+              "min": -7.758725643157959,
+              "max": 11.073734283447266,
+              "mean": 0.03426311584976789,
+              "display_min": -6.522500715255737,
+              "display_max": 6.991310739517196
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717010000.webp",
+              "min": -8.389974594116211,
+              "max": 8.274686813354492,
+              "mean": 0.12465003532300545,
+              "display_min": -6.077046661376953,
+              "display_max": 5.90047659873962
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717020000.webp",
+              "min": -8.595820426940918,
+              "max": 7.710545539855957,
+              "mean": 0.2385334528088575,
+              "display_min": -5.85034255027771,
+              "display_max": 5.501701936721797
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717030000.webp",
+              "min": -9.610188484191895,
+              "max": 6.740762233734131,
+              "mean": 0.32660004852807256,
+              "display_min": -5.545637073516846,
+              "display_max": 5.117988252639771
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717040000.webp",
+              "min": -8.162452697753906,
+              "max": 6.0051116943359375,
+              "mean": 0.44923516748631304,
+              "display_min": -5.432787981033325,
+              "display_max": 4.721651382446286
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717050000.webp",
+              "min": -6.522516250610352,
+              "max": 8.241142272949219,
+              "mean": 0.6022043809356434,
+              "display_min": -4.770528688430786,
+              "display_max": 4.68638283729553
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717060000.webp",
+              "min": -7.821821689605713,
+              "max": 9.855697631835938,
+              "mean": 0.7550220157192076,
+              "display_min": -4.543092107772827,
+              "display_max": 4.921226272583002
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717070000.webp",
+              "min": -6.744809150695801,
+              "max": 10.863978385925293,
+              "mean": 0.8820555248539438,
+              "display_min": -4.309035692214966,
+              "display_max": 5.258930149078365
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717080000.webp",
+              "min": -9.306572914123535,
+              "max": 8.402599334716797,
+              "mean": 0.9966592125939827,
+              "display_min": -4.17574818611145,
+              "display_max": 5.658121585845946
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717090000.webp",
+              "min": -9.87718391418457,
+              "max": 9.657299041748047,
+              "mean": 1.1343950908620242,
+              "display_min": -3.7941809606552126,
+              "display_max": 6.008517446517944
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717100000.webp",
+              "min": -10.093996047973633,
+              "max": 9.338860511779785,
+              "mean": 1.2877117451317257,
+              "display_min": -3.5525783920288085,
+              "display_max": 6.1624686241149895
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717110000.webp",
+              "min": -9.146639823913574,
+              "max": 8.087451934814453,
+              "mean": 1.2464683432832646,
+              "display_min": -4.062044363021851,
+              "display_max": 5.750633201599111
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/V10/20260717120000.webp",
+              "min": -7.987095832824707,
+              "max": 9.157631874084473,
+              "mean": 1.458909462359072,
+              "display_min": -3.968153738975525,
+              "display_max": 5.799918317794797
+            }
+          ]
+        },
+        {
+          "name": "PSFC",
+          "label": "地面气压",
+          "units": "Pa",
+          "description": "SFC PRESSURE",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717000000.webp",
+              "min": 76975.515625,
+              "max": 100423.046875,
+              "mean": 91692.5333555667,
+              "display_min": 81796.1415625,
+              "display_max": 100326.47859375
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717010000.webp",
+              "min": 76955.3046875,
+              "max": 100330.5390625,
+              "mean": 91675.51859568717,
+              "display_min": 81785.63265625,
+              "display_max": 100276.2978125
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717020000.webp",
+              "min": 76985.328125,
+              "max": 100288.3046875,
+              "mean": 91643.47914905607,
+              "display_min": 81739.4425,
+              "display_max": 100238.0796875
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717030000.webp",
+              "min": 76973.765625,
+              "max": 100319.875,
+              "mean": 91614.8860759633,
+              "display_min": 81704.9165625,
+              "display_max": 100283.63171875
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717040000.webp",
+              "min": 76975.1484375,
+              "max": 100272.15625,
+              "mean": 91576.993731729,
+              "display_min": 81690.57359375,
+              "display_max": 100232.4853125
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717050000.webp",
+              "min": 76973.625,
+              "max": 100234.1171875,
+              "mean": 91534.20864702205,
+              "display_min": 81664.76765625,
+              "display_max": 100186.72234375
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717060000.webp",
+              "min": 76974.203125,
+              "max": 100217.9140625,
+              "mean": 91494.45305345696,
+              "display_min": 81644.96734375,
+              "display_max": 100155.6853125
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717070000.webp",
+              "min": 76968.1875,
+              "max": 100189.375,
+              "mean": 91465.13744518702,
+              "display_min": 81611.720625,
+              "display_max": 100138.96375
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717080000.webp",
+              "min": 76970.625,
+              "max": 100171.0390625,
+              "mean": 91450.05361655571,
+              "display_min": 81596.51546875,
+              "display_max": 100132.0096875
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717090000.webp",
+              "min": 76971.3359375,
+              "max": 100149.5234375,
+              "mean": 91442.04431485981,
+              "display_min": 81585.20796875,
+              "display_max": 100132.1875
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717100000.webp",
+              "min": 76975.5078125,
+              "max": 100143.9609375,
+              "mean": 91441.45012789694,
+              "display_min": 81586.50375,
+              "display_max": 100126.6328125
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717110000.webp",
+              "min": 76975.65625,
+              "max": 100141.859375,
+              "mean": 91448.40377571147,
+              "display_min": 81591.23875,
+              "display_max": 100123.1053125
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PSFC/20260717120000.webp",
+              "min": 76969.75,
+              "max": 100144.6796875,
+              "mean": 91463.4937757555,
+              "display_min": 81592.83421875,
+              "display_max": 100125.309375
+            }
+          ]
+        },
+        {
+          "name": "PBLH",
+          "label": "边界层高度",
+          "units": "m",
+          "description": "PBL HEIGHT",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717000000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717010000.webp",
+              "min": 25.532318115234375,
+              "max": 1273.5137939453125,
+              "mean": 540.7865939673721,
+              "display_min": 29.002970275878905,
+              "display_max": 954.3386608886718
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717020000.webp",
+              "min": 25.49774169921875,
+              "max": 1755.256103515625,
+              "mean": 680.2381196584995,
+              "display_min": 30.057759895324708,
+              "display_max": 1348.066904296874
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717030000.webp",
+              "min": 25.48236083984375,
+              "max": 2011.86865234375,
+              "mean": 846.3291753743124,
+              "display_min": 56.90687767028808,
+              "display_max": 1773.0089208984368
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717040000.webp",
+              "min": 25.54095458984375,
+              "max": 2596.5400390625,
+              "mean": 1036.9060270379853,
+              "display_min": 48.36599021911621,
+              "display_max": 2169.54431640625
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717050000.webp",
+              "min": 25.60931396484375,
+              "max": 3129.58935546875,
+              "mean": 1236.7671002269497,
+              "display_min": 41.06935691833496,
+              "display_max": 2503.0470068359346
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717060000.webp",
+              "min": 25.7059326171875,
+              "max": 3732.114990234375,
+              "mean": 1394.5180734643536,
+              "display_min": 32.83883476257324,
+              "display_max": 2742.3552099609374
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717070000.webp",
+              "min": 25.875873565673828,
+              "max": 3530.141357421875,
+              "mean": 1393.6934178463337,
+              "display_min": 28.97514362335205,
+              "display_max": 2686.0433154296875
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717080000.webp",
+              "min": 25.699398040771484,
+              "max": 3491.35107421875,
+              "mean": 1306.696270037114,
+              "display_min": 27.52768699645996,
+              "display_max": 2621.60916015625
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717090000.webp",
+              "min": 26.051876068115234,
+              "max": 3200.000244140625,
+              "mean": 1160.37748894674,
+              "display_min": 26.237806854248046,
+              "display_max": 2578.954638671875
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717100000.webp",
+              "min": 25.60772705078125,
+              "max": 3005.580322265625,
+              "mean": 896.4727239434098,
+              "display_min": 26.193768768310548,
+              "display_max": 2462.9662402343743
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717110000.webp",
+              "min": 25.11846923828125,
+              "max": 2642.414306640625,
+              "mean": 558.6325427155052,
+              "display_min": 26.184146614074706,
+              "display_max": 1956.8460058593737
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/PBLH/20260717120000.webp",
+              "min": 25.17120361328125,
+              "max": 1764.0191650390625,
+              "mean": 312.4830102786174,
+              "display_min": 25.735938720703125,
+              "display_max": 1197.7293212890615
+            }
+          ]
+        },
+        {
+          "name": "RAINC",
+          "label": "积云降水",
+          "units": "mm",
+          "description": "ACCUMULATED TOTAL CUMULUS PRECIPITATION",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717000000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717010000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717020000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717030000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717040000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717050000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717060000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717070000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717080000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717090000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717100000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717110000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINC/20260717120000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            }
+          ]
+        },
+        {
+          "name": "RAINNC",
+          "label": "非积云降水",
+          "units": "mm",
+          "description": "ACCUMULATED TOTAL GRID SCALE PRECIPITATION",
+          "frames": [
+            {
+              "time": "2026-07-17T00:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717000000.webp",
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "display_min": 0.0,
+              "display_max": 1.0
+            },
+            {
+              "time": "2026-07-17T01:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717010000.webp",
+              "min": 0.0,
+              "max": 5.542930603027344,
+              "mean": 0.03693055601774867,
+              "display_min": 0.0,
+              "display_max": 0.36930105507373573
+            },
+            {
+              "time": "2026-07-17T02:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717020000.webp",
+              "min": 0.0,
+              "max": 8.443778038024902,
+              "mean": 0.11623694311029252,
+              "display_min": 0.0,
+              "display_max": 1.7797496342658978
+            },
+            {
+              "time": "2026-07-17T03:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717030000.webp",
+              "min": 0.0,
+              "max": 9.441313743591309,
+              "mean": 0.19375862934003432,
+              "display_min": 0.0,
+              "display_max": 3.1520841026306137
+            },
+            {
+              "time": "2026-07-17T04:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717040000.webp",
+              "min": 0.0,
+              "max": 10.973262786865234,
+              "mean": 0.25019917341747017,
+              "display_min": 0.0,
+              "display_max": 3.875896558761595
+            },
+            {
+              "time": "2026-07-17T05:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717050000.webp",
+              "min": 0.0,
+              "max": 26.516357421875,
+              "mean": 0.302936928719487,
+              "display_min": 0.0,
+              "display_max": 4.653267250061019
+            },
+            {
+              "time": "2026-07-17T06:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717060000.webp",
+              "min": 0.0,
+              "max": 26.793270111083984,
+              "mean": 0.36356984638292794,
+              "display_min": 0.0,
+              "display_max": 5.682395887374844
+            },
+            {
+              "time": "2026-07-17T07:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717070000.webp",
+              "min": 0.0,
+              "max": 34.35289001464844,
+              "mean": 0.44566623514852727,
+              "display_min": 0.0,
+              "display_max": 6.5639827632903645
+            },
+            {
+              "time": "2026-07-17T08:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717080000.webp",
+              "min": 0.0,
+              "max": 41.43696212768555,
+              "mean": 0.4982798519837755,
+              "display_min": 0.0,
+              "display_max": 6.8391176700591805
+            },
+            {
+              "time": "2026-07-17T09:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717090000.webp",
+              "min": 0.0,
+              "max": 41.87207794189453,
+              "mean": 0.5544866968643559,
+              "display_min": 0.0,
+              "display_max": 7.087095298767076
+            },
+            {
+              "time": "2026-07-17T10:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717100000.webp",
+              "min": 0.0,
+              "max": 69.64419555664062,
+              "mean": 0.6255846410484524,
+              "display_min": 0.0,
+              "display_max": 7.384840269088722
+            },
+            {
+              "time": "2026-07-17T11:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717110000.webp",
+              "min": 0.0,
+              "max": 83.45269775390625,
+              "mean": 0.6934598672464367,
+              "display_min": 0.0,
+              "display_max": 7.948220596313476
+            },
+            {
+              "time": "2026-07-17T12:00:00Z",
+              "url": "/data/WRF/runs/wrf_gfs_20260720T113510Z_7bb2c76c/rendered/d01/RAINNC/20260717120000.webp",
+              "min": 0.0,
+              "max": 89.01156616210938,
+              "mean": 0.7255500541201543,
+              "display_min": 0.0,
+              "display_max": 8.006398944854732
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "created_at": "2026-07-20T12:29:05.005058Z"
+}

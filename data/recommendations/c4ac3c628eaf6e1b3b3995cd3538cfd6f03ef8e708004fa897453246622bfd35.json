@@ -1,0 +1,95 @@
+{
+  "fingerprint": "c4ac3c628eaf6e1b3b3995cd3538cfd6f03ef8e708004fa897453246622bfd35",
+  "version": "2026.07-geography-season-v2",
+  "generated_at": "2026-07-21T11:30:36.312145Z",
+  "forecast_focus": "general",
+  "physics": {
+    "preset": "地理季节综合推荐",
+    "mp_physics": 8,
+    "cu_physics": 3,
+    "cu_physics_by_domain": [
+      3,
+      0,
+      0
+    ],
+    "ra_lw_physics": 4,
+    "ra_sw_physics": 4,
+    "bl_pbl_physics": 2,
+    "sf_sfclay_physics": 2,
+    "sf_surface_physics": 2,
+    "sf_urban_physics": 0,
+    "sf_urban_physics_by_domain": [
+      0,
+      0,
+      0
+    ],
+    "num_soil_layers": 4,
+    "num_land_cat": 21,
+    "radt": 1
+  },
+  "spinup": {
+    "mode": "custom",
+    "hours": 12
+  },
+  "assimilation_scheme": "fdda_standard",
+  "geography": {
+    "fingerprint": "eed759ebe6a5acae4c8c05e23e1fdd9f8ce3bbea9260b4fb2c681e3509ff71a7",
+    "source": "hpc_wps_geogrid",
+    "domains": [
+      {
+        "domain": "d01",
+        "terrain_mean_m": 1510.684926,
+        "terrain_max_m": 4552.691,
+        "terrain_std_m": 771.134243,
+        "terrain_range_m": 4470.89119,
+        "land_fraction": 0.999023,
+        "water_fraction": 0.000977,
+        "urban_fraction": 0.002564
+      },
+      {
+        "domain": "d02",
+        "terrain_mean_m": 1935.761908,
+        "terrain_max_m": 2901.813,
+        "terrain_std_m": 259.649078,
+        "terrain_range_m": 2105.0786,
+        "land_fraction": 0.986325,
+        "water_fraction": 0.013675,
+        "urban_fraction": 0.018803
+      },
+      {
+        "domain": "d03",
+        "terrain_mean_m": 2038.719124,
+        "terrain_max_m": 2511.292,
+        "terrain_std_m": 147.24892,
+        "terrain_range_m": 809.887,
+        "land_fraction": 0.919929,
+        "water_fraction": 0.080071,
+        "urban_fraction": 0.168607
+      }
+    ],
+    "remote_cache": "~/WRFwork/backend_wrf_geo/eed759ebe6a5acae4c8c05e23e1fdd9f8ce3bbea9260b4fb2c681e3509ff71a7"
+  },
+  "factors": {
+    "latitude": 25.32,
+    "month": 7,
+    "season": "暖季",
+    "complex_terrain": true,
+    "coastal": false,
+    "max_water_fraction": 0.080071,
+    "max_urban_fraction": 0.168607,
+    "finest_dx_m": 1000
+  },
+  "confidence": 0.9,
+  "reasons": [
+    "中心纬度 25.32°、起报月份 7 月，判定为暖季；据此选择微物理 8。",
+    "geogrid 地形最高约 4553 m、起伏 4471 m、标准差 771 m；边界层/近地层采用 2/2。",
+    "区域最大水体比例 8%、城市比例 17%；城市冠层按逐域城市比例和网格距设置。",
+    "积云参数按网格距逐域设置为 [3, 0, 0]：≥10 km 参数化、3–10 km 尺度感知、≤3 km 显式对流。",
+    "综合关注点、最细网格、地形和下垫面，建议 12 小时 spin-up，辐射调用间隔 1 分钟。",
+    "网格松弛只建议用于 spin-up 的 ≥9 km 粗网格，且不松弛水汽和边界层。",
+    "geogrid 显示复杂地形，延长 spin-up 以减小初始调整噪声。"
+  ],
+  "warnings": [
+    "该方案是规则化起点，不代表对个例最优；正式业务应通过历史个例回报检验。"
+  ]
+}
