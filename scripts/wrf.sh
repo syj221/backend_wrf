@@ -578,6 +578,7 @@ write_stage() {
     local message="${3:-}"
     local file
     local record
+    export WRF_CURRENT_STAGE="$stage"
     file=$(stage_status_file)
     mkdir -p "$(dirname "$file")" 2>/dev/null || true
     record=$(printf '{"time":"%s","stage":"%s","status":"%s","message":"%s"}' \
@@ -1858,9 +1859,18 @@ on_wrf_error() {
     local exit_code="$1"
     local line="$2"
     local command="$3"
+    local failed_stage="${WRF_CURRENT_STAGE:-unknown}"
     set +e
     log_error "脚本失败: line=${line}, exit=${exit_code}, command=${command}"
     write_stage "failed" "error" "第 ${line} 行失败，退出码 ${exit_code}: ${command}"
+    if [ -n "${WRF_FAILURE_FILE:-}" ]; then
+        local escaped_command escaped_stage
+        escaped_command=$(printf '%s' "$command" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        escaped_stage=$(printf '%s' "$failed_stage" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        mkdir -p "$(dirname "$WRF_FAILURE_FILE")" 2>/dev/null || true
+        printf '{"failure_class":"model","stage":"%s","exit_code":%s,"line":%s,"command":"%s"}\n' \
+            "$escaped_stage" "$exit_code" "$line" "$escaped_command" > "$WRF_FAILURE_FILE"
+    fi
     exit "$exit_code"
 }
 

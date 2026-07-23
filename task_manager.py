@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import queue
 import shutil
 import threading
@@ -14,11 +15,15 @@ from typing import Any
 from config import Settings
 from database import TaskStore
 from gfs import GfsManager
-from hpc import HpcClient, write_task_bundle
+from hpc import HpcClient, HpcError, write_task_bundle
 from renderer import render_run
 
 
-FINAL_STATES = {"succeeded", "partial_success", "failed", "cancelled"}
+FINAL_STATES = {"succeeded", "partial_success", "failed", "cancelled", "waiting_restart"}
+EXTERNAL_ERROR_MARKERS = (
+    "堡垒", "会话", "连接", "认证", "密码", "shell", "timeout", "timed out",
+    "connection", "disconnect", "broken pipe", "eof", "permission denied",
+)
 
 
 def resolve_spinup_hours(request: dict[str, Any]) -> int:
@@ -47,6 +52,15 @@ class TaskCancelledError(RuntimeError):
     pass
 
 
+class RemoteTaskFailure(RuntimeError):
+    def __init__(self, status: dict[str, Any]):
+        self.remote_status = status
+        exit_code = status.get("exit_code", "?")
+        failure = status.get("failure") or {}
+        detail = failure.get("command") or failure.get("message") or ""
+        super().__init__(f"远端 WRF 退出码 {exit_code}{f'：{detail}' if detail else ''}")
+
+
 class WrfTaskManager:
     def __init__(self, settings: Settings, store: TaskStore, gfs: GfsManager, hpc: HpcClient):
         self.settings = settings
@@ -59,6 +73,7 @@ class WrfTaskManager:
         self._state_lock = threading.RLock()
         self._cancelled: set[str] = set()
         self._cancel_threads: dict[str, threading.Thread] = {}
+        self._reconcile_timers: dict[str, threading.Timer] = {}
         self._active_task_ids: set[str] = set()
         self._cycle_locks: dict[str, threading.Lock] = {}
         self._health: dict[str, Any] = {"status": "checking", "message": "等待检查超算连接"}
@@ -92,10 +107,22 @@ class WrfTaskManager:
 
     def authenticate_hpc(self, password: str) -> dict[str, Any]:
         self._health = self.hpc.authenticate_password(password)
+        if self._health.get("status") == "ready":
+            self._resume_paused_tasks()
         return self.hpc_health
 
     def _check_health(self) -> None:
         self._health = self.hpc.health()
+        if self._health.get("status") == "ready":
+            self._resume_paused_tasks()
+
+    def _resume_paused_tasks(self) -> None:
+        resumable = getattr(self.store, "with_status", lambda *_args: [])("paused_external")
+        for task in resumable:
+            try:
+                self.resume_external(task["id"], automatic=True)
+            except (TaskConflictError, TaskNotFoundError):
+                continue
 
     def start(self) -> None:
         if any(worker.is_alive() for worker in self._workers):
@@ -144,6 +171,10 @@ class WrfTaskManager:
             worker.join(timeout=max(0, deadline - time.monotonic()))
         with self._state_lock:
             cancel_threads = list(self._cancel_threads.values())
+            reconcile_timers = list(self._reconcile_timers.values())
+            self._reconcile_timers.clear()
+        for timer in reconcile_timers:
+            timer.cancel()
         for thread in cancel_threads:
             thread.join(timeout=max(0, deadline - time.monotonic()))
         if not any(worker.is_alive() for worker in workers) and not any(
@@ -156,34 +187,227 @@ class WrfTaskManager:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"wrf_gfs_{stamp}_{uuid.uuid4().hex[:8]}"
 
-    def submit(self, request: dict[str, Any]) -> dict[str, Any]:
+    def submit(self, request: dict[str, Any], owner_sub: str = "") -> dict[str, Any]:
         task_id = self.new_task_id()
         task_dir = self.settings.run_dir / task_id
         (task_dir / "raw").mkdir(parents=True, exist_ok=False)
         (task_dir / "task.request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
-        task = self.store.create(task_id, request)
+        self.store.create(task_id, request, owner_sub)
+        task = self._merge_runtime(
+            task_id,
+            attempt_started_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
         self._queue.put(task_id)
         self._log(task_id, f"任务已进入并行队列（最多 {self.settings.max_concurrent_tasks} 个任务）")
         return task
+
+    @staticmethod
+    def _decorate_legacy_failure(task: dict[str, Any]) -> dict[str, Any]:
+        if task.get("failure") or task.get("status") != "failed" or not task.get("error"):
+            return task
+        message = str(task.get("error") or "")
+        lowered = message.lower()
+        runtime = task.get("runtime") or {}
+        if any(marker in lowered for marker in EXTERNAL_ERROR_MARKERS):
+            failure_class, action = "external", "resume"
+        elif runtime.get("remote_wrf_succeeded"):
+            failure_class, action = "output", "retry_outputs"
+        else:
+            failure_class, action = "model", "edit_and_restart"
+        task["failure"] = {
+            "failure_class": failure_class,
+            "stage": task.get("stage") or "unknown",
+            "code": "legacy_error",
+            "message": message,
+            "recoverable": True,
+            "recommended_action": action,
+            "derived": True,
+        }
+        return task
+
+    def _attempt_summaries(self, task_id: str) -> list[dict[str, Any]]:
+        attempts = getattr(self.store, "attempts", None)
+        if not attempts:
+            return []
+        return [
+            {
+                key: item.get(key)
+                for key in (
+                    "attempt_no", "status", "stage", "progress", "failure", "error",
+                    "started_at", "finished_at",
+                )
+            }
+            for item in attempts(task_id)
+        ]
 
     def get(self, task_id: str) -> dict[str, Any]:
         task = self.store.get(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
+        task = self._decorate_legacy_failure(task)
+        task["attempts"] = self._attempt_summaries(task_id)
         return task
 
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self.store.list(limit)
+    def list(self, limit: int = 50, owner_sub: str | None = None) -> list[dict[str, Any]]:
+        tasks = self.store.list(limit, owner_sub)
+        for task in tasks:
+            task["attempts"] = self._attempt_summaries(task["id"])
+        return [self._decorate_legacy_failure(task) for task in tasks]
 
     def active_gfs_cycles(self) -> set[str]:
+        tasks = list(self.store.active())
+        paused = getattr(self.store, "with_status", lambda *_args: [])("paused_external")
+        tasks.extend(paused)
         return {
             str((task.get("runtime") or {}).get("gfs_cycle"))
-            for task in self.store.active()
+            for task in tasks
             if (task.get("runtime") or {}).get("gfs_cycle")
         }
 
     def retry(self, task_id: str) -> dict[str, Any]:
-        return self.submit(self.get(task_id)["request"])
+        self.get(task_id)
+        raise TaskConflictError("旧重试入口已停用；请先获取 restart-plan、核对精确路径，再提交 restart")
+
+    def _restart_local_paths(self, task_id: str) -> list[Path]:
+        run_dir = self._managed_task_path(self.settings.run_dir, task_id)
+        output_dir = self._managed_task_path(self.settings.output_dir / "runs", task_id)
+        return [
+            run_dir / "raw",
+            output_dir,
+            run_dir / "service.log",
+            run_dir / "task.config.json",
+            run_dir / "task.env",
+            run_dir / "gfs.expected.tsv",
+        ]
+
+    def restart_plan(self, task_id: str) -> dict[str, Any]:
+        task = self.get(task_id)
+        if task["status"] not in {"waiting_restart", "failed", "cancelled"}:
+            raise TaskConflictError("只有已失败、待调整或已取消的任务可以清理后重跑")
+        runtime = task.get("runtime") or {}
+        if runtime.get("remote_wrf_succeeded"):
+            raise TaskConflictError("远端 WRF 已完成，请恢复结果下载，不要清理重跑")
+        status = self.hpc.status(task_id)
+        remote_status = str(status.get("status") or "unknown")
+        allow_missing = not runtime.get("remote_pid") and not runtime.get("remote_launch_attempted")
+        can_restart = remote_status == "failed" or (remote_status == "missing" and allow_missing)
+        reason = None
+        if remote_status == "running":
+            reason = "远端任务仍在运行"
+        elif remote_status == "succeeded":
+            reason = "远端任务已成功，应恢复结果下载"
+        elif remote_status == "lost":
+            reason = "远端进程状态不明"
+        elif remote_status == "missing" and not allow_missing:
+            reason = "任务曾启动远端进程，但远端记录缺失"
+        remote_paths = getattr(self.hpc, "task_artifact_paths", lambda _task_id: [])(task_id)
+        return {
+            "task_id": task_id,
+            "attempt_no": int(task.get("attempt_no") or 1),
+            "remote_status": remote_status,
+            "can_restart": can_restart,
+            "reason": reason,
+            "local_paths": [str(path) for path in self._restart_local_paths(task_id)],
+            "remote_paths": remote_paths,
+            "preserved": [str(self.settings.run_dir / task_id / "attempts"), self.settings.hpc_gfs_dir],
+        }
+
+    def _archive_attempt_files(self, task: dict[str, Any]) -> Path:
+        task_id = task["id"]
+        attempt_no = int(task.get("attempt_no") or 1)
+        run_dir = self._managed_task_path(self.settings.run_dir, task_id)
+        attempt_dir = run_dir / "attempts" / f"{attempt_no:03d}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        log_path = run_dir / "service.log"
+        archived_log = attempt_dir / "service.log"
+        if log_path.exists():
+            shutil.copy2(log_path, archived_log)
+        snapshot = {
+            key: task.get(key)
+            for key in ("id", "attempt_no", "status", "stage", "progress", "request", "runtime", "result", "failure", "error")
+        }
+        (attempt_dir / "attempt.json").write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return archived_log
+
+    def restart(
+        self,
+        task_id: str,
+        request: dict[str, Any],
+        *,
+        confirm_task_id: str,
+        confirm_attempt: int,
+    ) -> dict[str, Any]:
+        task = self.get(task_id)
+        if confirm_task_id != task_id or confirm_attempt != int(task.get("attempt_no") or 1):
+            raise ValueError("任务或尝试次数确认值已过期，请重新获取清理清单")
+        plan = self.restart_plan(task_id)
+        if not plan["can_restart"]:
+            raise TaskConflictError(plan.get("reason") or "当前远端状态不允许清理重跑")
+        if (task.get("failure") or {}).get("derived"):
+            persisted_failure = dict(task["failure"])
+            persisted_failure.pop("derived", None)
+            self.store.update(task_id, failure=persisted_failure)
+            task["failure"] = persisted_failure
+        archived_log = self._archive_attempt_files(task)
+        archive_attempt = getattr(self.store, "archive_attempt", None)
+        if archive_attempt:
+            archive_attempt(task_id, str(archived_log) if archived_log.exists() else None)
+        runtime = task.get("runtime") or {}
+        cleanup = getattr(self.hpc, "cleanup_task_attempt", None)
+        if cleanup:
+            cleanup(
+                task_id,
+                allow_missing=not runtime.get("remote_pid") and not runtime.get("remote_launch_attempted"),
+            )
+        for path in self._restart_local_paths(task_id):
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        run_dir = self._managed_task_path(self.settings.run_dir, task_id)
+        (run_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (run_dir / "task.request.json").write_text(
+            json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        begin_attempt = getattr(self.store, "begin_attempt", None)
+        if not begin_attempt:
+            raise RuntimeError("任务存储不支持同任务重跑")
+        with self._state_lock:
+            self._cancelled.discard(task_id)
+        restarted = begin_attempt(task_id, request)
+        self._queue.put(task_id)
+        self._log(task_id, f"已清理任务级残片并开始第 {restarted['attempt_no']} 次尝试；共享 GFS 数据池已保留")
+        return self.get(task_id)
+
+    def resume_external(self, task_id: str, *, automatic: bool = False) -> dict[str, Any]:
+        task = self.get(task_id)
+        failure = task.get("failure") or {}
+        if task["status"] not in {"paused_external", "reconciling", "failed"}:
+            raise TaskConflictError("当前任务不处于可恢复的外部中断状态")
+        if task["status"] == "failed" and failure.get("failure_class") != "external":
+            raise TaskConflictError("该失败不是外部连接故障，不能断点继续")
+        if task["status"] == "reconciling":
+            return task
+        with self._state_lock:
+            timer = self._reconcile_timers.pop(task_id, None)
+            if timer:
+                timer.cancel()
+        runtime = dict(task.get("runtime") or {})
+        runtime["external_retry_started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        runtime["external_retry_count"] = 0
+        self.store.update(
+            task_id,
+            status="reconciling",
+            stage="reconciling",
+            runtime=runtime,
+            failure={**failure, "failure_class": "external", "recoverable": True, "recommended_action": "resume"},
+            error=None,
+        )
+        self._queue.put(task_id)
+        self._log(task_id, "超算认证成功，自动继续原任务对账" if automatic else "用户请求继续任务，开始与超算对账")
+        return self.get(task_id)
 
     def retry_outputs(self, task_id: str) -> dict[str, Any]:
         task = self.get(task_id)
@@ -274,9 +498,29 @@ class WrfTaskManager:
         with path.open("a", encoding="utf-8") as output:
             output.write(f"[{stamp}] {message.rstrip()}\n")
 
-    def logs(self, task_id: str, after: int = 0, limit: int = 65536) -> dict[str, Any]:
-        self.get(task_id)
+    def logs(
+        self,
+        task_id: str,
+        after: int = 0,
+        limit: int = 65536,
+        attempt_no: int | None = None,
+    ) -> dict[str, Any]:
+        task = self.get(task_id)
+        current_attempt = int(task.get("attempt_no") or 1)
         path = self._log_path(task_id)
+        if attempt_no is not None and attempt_no != current_attempt:
+            attempts = getattr(self.store, "attempts", lambda _task_id: [])(task_id)
+            archived = next(
+                (item for item in attempts if int(item.get("attempt_no") or 0) == attempt_no),
+                None,
+            )
+            if not archived or not archived.get("log_path"):
+                raise TaskNotFoundError(f"{task_id}/attempt/{attempt_no}")
+            candidate = Path(str(archived["log_path"])).resolve()
+            attempts_root = (self.settings.run_dir / task_id / "attempts").resolve()
+            if attempts_root not in candidate.parents:
+                raise ValueError("历史日志不在任务归档目录内")
+            path = candidate
         if not path.exists():
             return {"offset": 0, "text": ""}
         size = path.stat().st_size
@@ -285,13 +529,110 @@ class WrfTaskManager:
             source.seek(start)
             data = source.read(max(1, min(int(limit), 262144)))
             offset = source.tell()
-        return {"offset": offset, "text": data.decode("utf-8", errors="replace")}
+        text = data.decode("utf-8", errors="replace")
+        text = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", text)
+        text = "".join(char for char in text if char in "\n\r\t" or ord(char) >= 32)
+        return {"offset": offset, "text": text}
 
     def _merge_runtime(self, task_id: str, **values: Any) -> dict[str, Any]:
         task = self.get(task_id)
         runtime = dict(task.get("runtime") or {})
         runtime.update(values)
         return self.store.update(task_id, runtime=runtime)
+
+    @staticmethod
+    def _is_external_error(exc: Exception) -> bool:
+        if isinstance(exc, RemoteTaskFailure):
+            return False
+        if isinstance(exc, HpcError):
+            message = str(exc).lower()
+            return any(marker in message for marker in EXTERNAL_ERROR_MARKERS)
+        return False
+
+    def _failure_info(self, task_id: str, exc: Exception) -> dict[str, Any]:
+        task = self.get(task_id)
+        runtime = task.get("runtime") or {}
+        message = str(exc)
+        lowered = message.lower()
+        remote_failure = exc.remote_status.get("failure") if isinstance(exc, RemoteTaskFailure) else None
+        stage = str((remote_failure or {}).get("stage") or task.get("stage") or "unknown")
+        if self._is_external_error(exc):
+            failure_class, action, recoverable = "external", "resume", True
+        elif runtime.get("remote_wrf_succeeded") or stage in {"downloading_outputs", "rendering", "checking_remote_outputs"}:
+            failure_class, action, recoverable = "output", "retry_outputs", True
+        elif stage in {"selecting_cycle", "checking_hpc_gfs", "waiting_for_hpc_gfs", "remote_gfs_ready", "data"}:
+            failure_class, action, recoverable = "data", "restart", True
+        elif any(marker in lowered for marker in ("namelist", "parameter", "参数", "配置", "mismatch", "inconsisten")):
+            failure_class, action, recoverable = "configuration", "edit_and_restart", True
+        else:
+            failure_class, action, recoverable = "model", "edit_and_restart", True
+        return {
+            "failure_class": failure_class,
+            "stage": stage,
+            "code": str((remote_failure or {}).get("exit_code") or getattr(exc, "remote_status", {}).get("exit_code") or ""),
+            "message": message,
+            "recoverable": recoverable,
+            "recommended_action": action,
+            "remote": remote_failure,
+        }
+
+    def _schedule_reconcile(self, task_id: str) -> None:
+        delay = self.settings.hpc_reconcile_interval_seconds
+
+        def enqueue() -> None:
+            with self._state_lock:
+                self._reconcile_timers.pop(task_id, None)
+            if self._stop.is_set():
+                return
+            task = self.store.get(task_id)
+            if task and task.get("status") == "reconciling":
+                self._queue.put(task_id)
+
+        with self._state_lock:
+            previous = self._reconcile_timers.pop(task_id, None)
+            if previous:
+                previous.cancel()
+            timer = threading.Timer(delay, enqueue)
+            timer.daemon = True
+            timer.name = f"wrf-reconcile-{task_id[-8:]}"
+            self._reconcile_timers[task_id] = timer
+            timer.start()
+
+    def _defer_external(self, task_id: str, exc: Exception) -> None:
+        task = self.get(task_id)
+        runtime = dict(task.get("runtime") or {})
+        now = datetime.now(timezone.utc)
+        started_text = runtime.get("external_retry_started_at")
+        try:
+            started = datetime.fromisoformat(str(started_text).replace("Z", "+00:00")) if started_text else now
+        except ValueError:
+            started = now
+        runtime["external_retry_started_at"] = started.isoformat().replace("+00:00", "Z")
+        runtime["external_retry_count"] = int(runtime.get("external_retry_count") or 0) + 1
+        failure = self._failure_info(task_id, exc)
+        elapsed = (now - started).total_seconds()
+        if elapsed >= self.settings.hpc_reconcile_timeout_seconds:
+            self.store.update(
+                task_id,
+                status="paused_external",
+                stage="paused_external",
+                runtime=runtime,
+                failure=failure,
+                error=str(exc),
+            )
+            minutes = max(1, self.settings.hpc_reconcile_timeout_seconds // 60)
+            self._log(task_id, f"外部连接连续 {minutes} 分钟不可用，任务已暂停；重新认证后可从原阶段继续")
+            return
+        self.store.update(
+            task_id,
+            status="reconciling",
+            stage="reconciling",
+            runtime=runtime,
+            failure=failure,
+            error=str(exc),
+        )
+        self._log(task_id, f"外部连接暂不可用，将在 {self.settings.hpc_reconcile_interval_seconds} 秒后继续对账：{exc}")
+        self._schedule_reconcile(task_id)
 
     def _is_cancelled(self, task_id: str) -> bool:
         with self._state_lock:
@@ -425,34 +766,56 @@ class WrfTaskManager:
             except Exception as exc:
                 if self._is_cancelled(task_id):
                     self._complete_worker_cancellation(task_id)
+                elif self._is_external_error(exc):
+                    self._defer_external(task_id, exc)
                 else:
                     self._log(task_id, f"任务失败：{exc}")
-                    self.store.update(task_id, status="failed", stage="failed", error=str(exc))
+                    failure = self._failure_info(task_id, exc)
+                    status = "failed" if failure["failure_class"] == "output" else "waiting_restart"
+                    self.store.update(
+                        task_id,
+                        status=status,
+                        stage="failed",
+                        failure=failure,
+                        error=str(exc),
+                    )
             finally:
                 with self._state_lock:
                     self._active_task_ids.discard(task_id)
                 self._queue.task_done()
 
     def _reconcile(self, task_id: str) -> str:
-        self._log(task_id, "服务重启后开始与超算任务对账")
-        while not self._stop.is_set():
-            self._raise_if_cancelled(task_id)
-            try:
-                status = self.hpc.status(task_id)
-            except Exception as exc:
-                self._log(task_id, f"超算暂不可达，30 秒后继续对账：{exc}")
-                self.store.update(task_id, status="reconciling", stage="reconciling", error=str(exc))
-                self._stop.wait(30)
-                continue
-            if status["status"] == "running":
-                self.store.update(task_id, status="running", stage="running", error=None)
-                return "monitor"
-            if status["status"] == "succeeded":
-                return "finalize"
-            if status["status"] == "failed":
-                raise RuntimeError(f"远端任务失败，退出码 {status.get('exit_code', '?')}")
-            self._log(task_id, "远端没有该任务，重新执行幂等的数据准备流程")
+        self._log(task_id, "开始与超算任务对账")
+        self._raise_if_cancelled(task_id)
+        status = self.hpc.status(task_id)
+        if status["status"] == "running":
+            self.store.update(task_id, status="running", stage="running", failure=None, error=None)
+            return "monitor"
+        if status["status"] == "succeeded":
+            return "finalize"
+        if status["status"] == "failed":
+            raise RemoteTaskFailure(status)
+        task = self.get(task_id)
+        runtime = task.get("runtime") or {}
+        if status["status"] == "missing" and not runtime.get("remote_pid") and not runtime.get("remote_launch_attempted"):
+            self._log(task_id, "远端尚未启动该任务，重新执行幂等的数据准备流程")
             return "restart"
+        failure = {
+            "failure_class": "model",
+            "stage": task.get("stage") or "unknown",
+            "code": f"remote_{status['status']}",
+            "message": "远端进程状态不明，已禁止自动清理和重复启动",
+            "recoverable": True,
+            "recommended_action": "edit_and_restart",
+        }
+        self.store.update(
+            task_id,
+            status="waiting_restart",
+            stage="failed",
+            failure=failure,
+            error=failure["message"],
+        )
+        self._log(task_id, failure["message"])
         return "stop"
 
     def _monitor(self, task_id: str) -> bool:
@@ -467,7 +830,7 @@ class WrfTaskManager:
             if status["status"] == "succeeded":
                 return True
             if status["status"] == "failed":
-                raise RuntimeError(f"远端 WRF 退出码 {status.get('exit_code', '?')}")
+                raise RemoteTaskFailure(status)
             if status["status"] not in {"running"}:
                 raise RuntimeError(f"远端任务状态异常：{status['status']}")
             self._stop.wait(self.settings.hpc_poll_seconds)
@@ -538,7 +901,15 @@ class WrfTaskManager:
         }
         partial = manifest.get("quality", {}).get("status") == "partial"
         final_status = "partial_success" if partial else "succeeded"
-        self.store.update(task_id, status=final_status, stage="done", progress=100, result=result, error=None)
+        self.store.update(
+            task_id,
+            status=final_status,
+            stage="done",
+            progress=100,
+            result=result,
+            failure=None,
+            error=None,
+        )
         self._log(task_id, "任务部分完成，坏帧已排除并记录质量告警" if partial else "任务完成，WebP 与 scene.meta.json 已生成")
 
     def _execute(self, task_id: str) -> None:
@@ -598,7 +969,14 @@ class WrfTaskManager:
         end = datetime.fromisoformat(request["end_time"].replace("Z", "+00:00"))
         spinup_hours = resolve_spinup_hours(request)
         model_start = start - timedelta(hours=spinup_hours)
-        self.store.update(task_id, status="prefetching", stage="selecting_cycle", progress=2, error=None)
+        self.store.update(
+            task_id,
+            status="prefetching",
+            stage="selecting_cycle",
+            progress=2,
+            failure=None,
+            error=None,
+        )
         self._log(task_id, f"产品起报前增加 {spinup_hours} 小时 spin-up；按固定 00Z 策略选择 GFS cycle")
         self._raise_if_cancelled(task_id)
         cycle, _ = self.gfs.select_cycle(model_start, end)
@@ -716,6 +1094,7 @@ class WrfTaskManager:
 
         self._raise_if_cancelled(task_id)
         self.store.update(task_id, status="running", stage="running", progress=68)
+        self._merge_runtime(task_id, remote_launch_attempted=True)
         launch = self.hpc.launch(task_id)
         self._merge_runtime(task_id, **launch)
         self._log(task_id, f"超算任务已启动，PID {launch['remote_pid']}")

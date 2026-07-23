@@ -25,10 +25,12 @@ class TaskStore:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         with self._db:
+            self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS wrf_tasks (
                     id TEXT PRIMARY KEY,
+                    owner_sub TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     stage TEXT NOT NULL,
                     progress INTEGER NOT NULL DEFAULT 0,
@@ -36,8 +38,38 @@ class TaskStore:
                     runtime_json TEXT NOT NULL DEFAULT '{}',
                     result_json TEXT,
                     error TEXT,
+                    failure_json TEXT,
+                    attempt_no INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            columns = {row[1] for row in self._db.execute("PRAGMA table_info(wrf_tasks)").fetchall()}
+            if "owner_sub" not in columns:
+                self._db.execute("ALTER TABLE wrf_tasks ADD COLUMN owner_sub TEXT NOT NULL DEFAULT ''")
+            if "failure_json" not in columns:
+                self._db.execute("ALTER TABLE wrf_tasks ADD COLUMN failure_json TEXT")
+            if "attempt_no" not in columns:
+                self._db.execute("ALTER TABLE wrf_tasks ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1")
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS wrf_task_attempts (
+                    task_id TEXT NOT NULL,
+                    attempt_no INTEGER NOT NULL,
+                    request_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    runtime_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT,
+                    failure_json TEXT,
+                    error TEXT,
+                    log_path TEXT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    PRIMARY KEY (task_id, attempt_no),
+                    FOREIGN KEY (task_id) REFERENCES wrf_tasks(id) ON DELETE CASCADE
                 )
                 """
             )
@@ -55,14 +87,24 @@ class TaskStore:
         value["runtime"] = json.loads(value.pop("runtime_json") or "{}")
         result = value.pop("result_json")
         value["result"] = json.loads(result) if result else None
+        failure = value.pop("failure_json", None)
+        value["failure"] = json.loads(failure) if failure else None
         return value
 
-    def create(self, task_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _decode_attempt(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        for key in ("request_json", "runtime_json", "result_json", "failure_json"):
+            raw = value.pop(key, None)
+            value[key.removesuffix("_json")] = json.loads(raw) if raw else None
+        return value
+
+    def create(self, task_id: str, request: dict[str, Any], owner_sub: str = "") -> dict[str, Any]:
         now = utc_now()
         with self._lock, self._db:
             self._db.execute(
-                "INSERT INTO wrf_tasks (id,status,stage,progress,request_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (task_id, "queued", "queued", 0, json.dumps(request, ensure_ascii=False), now, now),
+                "INSERT INTO wrf_tasks (id,owner_sub,status,stage,progress,request_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (task_id, owner_sub, "queued", "queued", 0, json.dumps(request, ensure_ascii=False), now, now),
             )
         return self.get(task_id)
 
@@ -71,10 +113,16 @@ class TaskStore:
             row = self._db.execute("SELECT * FROM wrf_tasks WHERE id=?", (task_id,)).fetchone()
         return self._decode(row)
 
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list(self, limit: int = 50, owner_sub: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(200, int(limit)))
         with self._lock:
-            rows = self._db.execute("SELECT * FROM wrf_tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            if owner_sub is None:
+                rows = self._db.execute("SELECT * FROM wrf_tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM wrf_tasks WHERE owner_sub=? ORDER BY created_at DESC LIMIT ?",
+                    (owner_sub, limit),
+                ).fetchall()
         return [self._decode(row) for row in rows]
 
     def active(self) -> list[dict[str, Any]]:
@@ -86,14 +134,19 @@ class TaskStore:
         return [self._decode(row) for row in rows]
 
     def update(self, task_id: str, **values: Any) -> dict[str, Any]:
-        allowed = {"status", "stage", "progress", "runtime", "result", "error"}
+        allowed = {"status", "stage", "progress", "request", "runtime", "result", "failure", "error", "attempt_no"}
         updates: list[str] = []
         params: list[Any] = []
         for key, value in values.items():
             if key not in allowed:
                 continue
-            column = {"runtime": "runtime_json", "result": "result_json"}.get(key, key)
-            if key in {"runtime", "result"}:
+            column = {
+                "request": "request_json",
+                "runtime": "runtime_json",
+                "result": "result_json",
+                "failure": "failure_json",
+            }.get(key, key)
+            if key in {"request", "runtime", "result", "failure"}:
                 value = json.dumps(value, ensure_ascii=False) if value is not None else None
             updates.append(f"{column}=?")
             params.append(value)
@@ -104,12 +157,84 @@ class TaskStore:
             self._db.execute(f"UPDATE wrf_tasks SET {', '.join(updates)} WHERE id=?", params)
         return self.get(task_id)
 
-    def latest_success(self) -> dict[str, Any] | None:
+    def archive_attempt(self, task_id: str, log_path: str | None = None) -> dict[str, Any]:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        now = utc_now()
+        with self._lock, self._db:
+            self._db.execute(
+                """
+                INSERT OR REPLACE INTO wrf_task_attempts (
+                    task_id,attempt_no,request_json,status,stage,progress,runtime_json,
+                    result_json,failure_json,error,log_path,started_at,finished_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    task_id,
+                    int(task.get("attempt_no") or 1),
+                    json.dumps(task["request"], ensure_ascii=False),
+                    task["status"],
+                    task["stage"],
+                    int(task.get("progress") or 0),
+                    json.dumps(task.get("runtime") or {}, ensure_ascii=False),
+                    json.dumps(task.get("result"), ensure_ascii=False) if task.get("result") is not None else None,
+                    json.dumps(task.get("failure"), ensure_ascii=False) if task.get("failure") is not None else None,
+                    task.get("error"),
+                    log_path,
+                    (task.get("runtime") or {}).get("attempt_started_at") or task.get("created_at") or now,
+                    now,
+                ),
+            )
+        return task
+
+    def begin_attempt(self, task_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return self.update(
+            task_id,
+            attempt_no=int(task.get("attempt_no") or 1) + 1,
+            request=request,
+            status="queued",
+            stage="queued",
+            progress=0,
+            runtime={"attempt_started_at": utc_now()},
+            result=None,
+            failure=None,
+            error=None,
+        )
+
+    def attempts(self, task_id: str) -> list[dict[str, Any]]:
         with self._lock:
-            row = self._db.execute(
+            rows = self._db.execute(
+                "SELECT * FROM wrf_task_attempts WHERE task_id=? ORDER BY attempt_no DESC",
+                (task_id,),
+            ).fetchall()
+        return [self._decode_attempt(row) for row in rows]
+
+    def with_status(self, *statuses: str) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM wrf_tasks WHERE status IN ({placeholders}) ORDER BY updated_at",
+                tuple(statuses),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def latest_success(self, owner_sub: str | None = None) -> dict[str, Any] | None:
+        with self._lock:
+            query = (
                 "SELECT * FROM wrf_tasks WHERE status IN ('succeeded','partial_success') "
-                "AND result_json IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
+                "AND result_json IS NOT NULL"
+            )
+            params: tuple[Any, ...] = ()
+            if owner_sub is not None:
+                query += " AND owner_sub=?"
+                params = (owner_sub,)
+            row = self._db.execute(query + " ORDER BY updated_at DESC LIMIT 1", params).fetchone()
         return self._decode(row)
 
     def delete(self, task_id: str) -> bool:

@@ -1147,6 +1147,18 @@ class HpcClient:
         self._assert_task_id(task_id)
         return f"{self.settings.hpc_remote_dir}/WRF_{task_id}/run"
 
+    def task_artifact_paths(self, task_id: str) -> list[str]:
+        """返回同一任务尝试可清理的精确受管路径，不包含共享 GFS 数据池。"""
+        self._assert_task_id(task_id)
+        root = self._absolute_remote_path(self.settings.hpc_remote_dir).rstrip("/")
+        return [
+            posixpath.join(root, "backend_wrf_tasks", task_id),
+            posixpath.join(root, f"WPS_{task_id}"),
+            posixpath.join(root, f"WRF_{task_id}"),
+            posixpath.join(root, f"logs_{task_id}"),
+            posixpath.join(root, f"stage_status_{task_id}.jsonl"),
+        ]
+
     def prepare_runtime(
         self,
         task_id: str,
@@ -1623,6 +1635,7 @@ class HpcClient:
             f"WRF_TASK_CONFIG={task_dir}/task.json "
             f"WRF_TASK_ENV={task_dir}/task.env "
             f"WRF_GFS_EXPECTED_INDEX={task_dir}/gfs.expected.tsv "
+            f"WRF_FAILURE_FILE={task_dir}/failure.json "
             f"WRF_NONINTERACTIVE=true "
             f"WRF_GFS_DATA_ROOT={self.settings.hpc_gfs_dir} "
         )
@@ -1667,10 +1680,40 @@ class HpcClient:
         if state.startswith("EXIT:0"):
             return {"status": "succeeded", "log": log}
         if state.startswith("EXIT:"):
-            return {"status": "failed", "exit_code": state.split(":", 1)[1].strip(), "log": log}
+            failure: dict[str, Any] | None = None
+            raw_failure = self.run(f"cat {task_dir}/failure.json 2>/dev/null || true", timeout=60)
+            try:
+                parsed = json.loads(raw_failure)
+                if isinstance(parsed, dict):
+                    failure = parsed
+            except (TypeError, json.JSONDecodeError):
+                failure = None
+            return {
+                "status": "failed",
+                "exit_code": state.split(":", 1)[1].strip(),
+                "log": log,
+                "failure": failure,
+            }
         if state == "RUNNING":
             return {"status": "running", "log": log}
         return {"status": state.lower(), "log": log}
+
+    def cleanup_task_attempt(self, task_id: str, *, allow_missing: bool = False) -> dict[str, Any]:
+        """清理单个任务尝试；调用方必须先取得用户对精确路径的确认。"""
+        state = self.status(task_id)
+        remote_status = str(state.get("status") or "unknown")
+        if remote_status == "running":
+            raise HpcError("远端任务仍在运行，不能清理后重跑")
+        if remote_status == "succeeded":
+            raise HpcError("远端任务已成功，请恢复结果下载而不是清理重跑")
+        if remote_status == "lost":
+            raise HpcError("远端进程状态不明，不能自动清理")
+        if remote_status == "missing" and not allow_missing:
+            raise HpcError("远端任务记录缺失，不能确认清理安全性")
+        paths = self.task_artifact_paths(task_id)
+        quoted = " ".join(self._quote_remote(path) for path in paths)
+        self.run(f"rm -rf -- {quoted}", timeout=300)
+        return {"status": remote_status, "deleted_paths": paths}
 
     def download_outputs(
         self,

@@ -12,6 +12,7 @@ fi
 # shellcheck disable=SC1090
 source "${WRF_TASK_ENV}"
 export WRF_TASK_ENV_LOADED="true"
+export WRF_FAILURE_FILE="${WRF_FAILURE_FILE:-${WRF_TASK_ENV%/*}/failure.json}"
 
 if [[ "${WRF_DATA_SOURCE:-}" != "gfs" ]]; then
     echo "[错误] 超算 GFS 入口仅接受 WRF_DATA_SOURCE=gfs，当前为 ${WRF_DATA_SOURCE:-未设置}" >&2

@@ -39,6 +39,27 @@ class PhysicsConfig(BaseModel):
     num_land_cat: int = 21
     radt: int = 5
 
+    @model_validator(mode="after")
+    def validate_supported_schemes(self):
+        supported = {
+            "mp_physics": ({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 16, 17, 18, 28, 32, 50, 51, 55}, self.mp_physics),
+            "cu_physics": ({0, 1, 2, 3, 5, 6, 7, 11, 14, 16, 93}, self.cu_physics),
+            "ra_lw_physics": ({1, 3, 4, 5, 7, 14, 24, 31}, self.ra_lw_physics),
+            "ra_sw_physics": ({1, 3, 4, 5, 7, 14, 24, 31}, self.ra_sw_physics),
+            "bl_pbl_physics": ({0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12}, self.bl_pbl_physics),
+            "sf_sfclay_physics": ({0, 1, 2, 5, 7, 10, 91}, self.sf_sfclay_physics),
+            "sf_surface_physics": ({0, 1, 2, 3, 4, 5, 7}, self.sf_surface_physics),
+            "sf_urban_physics": ({0, 1, 2, 3}, self.sf_urban_physics),
+            "num_soil_layers": ({4, 6, 9, 10}, self.num_soil_layers),
+            "num_land_cat": ({20, 21, 24, 28, 33, 40}, self.num_land_cat),
+        }
+        invalid = [name for name, (choices, value) in supported.items() if value not in choices]
+        if invalid:
+            raise ValueError(f"当前 WRF 环境不支持这些物理参数：{', '.join(invalid)}")
+        if not 1 <= self.radt <= 60:
+            raise ValueError("辐射调用间隔 radt 必须为 1-60 分钟")
+        return self
+
 
 class SpinupConfig(BaseModel):
     mode: Literal["off", "auto", "custom"] = "off"
@@ -166,6 +187,12 @@ class RemoteGfsCleanupRequest(BaseModel):
 
 class TaskDeleteRequest(BaseModel):
     confirm_task_id: str = Field(min_length=1)
+
+
+class WrfTaskRestartRequest(BaseModel):
+    request: WrfTaskCreate
+    confirm_task_id: str = Field(min_length=1)
+    confirm_attempt: int = Field(ge=1)
 
 
 class RemoteGfsTriggerRequest(BaseModel):

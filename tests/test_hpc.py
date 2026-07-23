@@ -23,6 +23,31 @@ def test_hpc_health_requires_runtime_directories(monkeypatch) -> None:
     assert client.health()["status"] == "ready"
 
 
+def test_task_artifact_paths_are_exact_and_exclude_shared_gfs(monkeypatch) -> None:
+    client = HpcClient(settings)
+    task_id = "wrf_gfs_20260722T000000Z_deadbeef"
+    monkeypatch.setattr(client, "_absolute_remote_path", lambda _path: "/share/home/user/WRFwork")
+
+    paths = client.task_artifact_paths(task_id)
+
+    assert paths == [
+        f"/share/home/user/WRFwork/backend_wrf_tasks/{task_id}",
+        f"/share/home/user/WRFwork/WPS_{task_id}",
+        f"/share/home/user/WRFwork/WRF_{task_id}",
+        f"/share/home/user/WRFwork/logs_{task_id}",
+        f"/share/home/user/WRFwork/stage_status_{task_id}.jsonl",
+    ]
+    assert all("gfsdata" not in path for path in paths)
+
+
+def test_cleanup_task_attempt_refuses_running_remote_process(monkeypatch) -> None:
+    client = HpcClient(settings)
+    monkeypatch.setattr(client, "status", lambda _task_id: {"status": "running"})
+
+    with pytest.raises(HpcError, match="仍在运行"):
+        client.cleanup_task_attempt("wrf_gfs_20260722T000000Z_deadbeef")
+
+
 def test_gfs_pool_marks_only_safe_old_cycles_for_cleanup(monkeypatch) -> None:
     client = HpcClient(settings)
     monkeypatch.setattr(

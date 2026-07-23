@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Iterable
+from typing import Any
 
 from fastapi.responses import JSONResponse
 
@@ -38,7 +39,17 @@ def decode_hs256(token: str) -> dict:
     return payload
 
 
-def install_auth(app, rules: Iterable[tuple[str, int]]) -> None:
+def _required_role(path: str, method: str, rules: list[tuple[str, Any]]) -> int | None:
+    for prefix, policy in rules:
+        if not path.startswith(prefix):
+            continue
+        if isinstance(policy, dict):
+            return int(policy.get(method.upper(), policy.get("*", 0))) or None
+        return int(policy)
+    return None
+
+
+def install_auth(app, rules: Iterable[tuple[str, Any]]) -> None:
     ordered = list(rules)
 
     @app.middleware("http")
@@ -46,7 +57,7 @@ def install_auth(app, rules: Iterable[tuple[str, int]]) -> None:
         path = request.url.path
         if request.method == "OPTIONS" or path in WHITELIST:
             return await call_next(request)
-        required = next((role for prefix, role in ordered if path.startswith(prefix)), None)
+        required = _required_role(path, request.method, ordered)
         if required is None:
             return await call_next(request)
         header = request.headers.get("authorization", "")

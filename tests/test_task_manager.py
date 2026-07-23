@@ -8,7 +8,7 @@ from pathlib import Path
 
 from config import settings
 from database import TaskStore
-from hpc_transport import SAFE_TASK_ID
+from hpc_transport import HpcError, SAFE_TASK_ID
 from recommendations import RecommendationManager
 from task_manager import TaskConflictError, WrfTaskManager
 import pytest
@@ -491,6 +491,171 @@ def test_monitor_does_not_finalize_when_service_is_stopping() -> None:
     manager._stop.set()
 
     assert manager._monitor("wrf_20260716T000000Z_deadbeef") is False
+
+
+def test_external_connection_error_enters_reconciliation_without_failing(monkeypatch) -> None:
+    task_id = "wrf_gfs_20260722T000000Z_deadbeef"
+    task = {
+        "id": task_id,
+        "status": "running",
+        "stage": "running",
+        "progress": 68,
+        "runtime": {"remote_pid": 123, "gfs_cycle": "2026072100"},
+        "attempt_no": 1,
+    }
+
+    class MemoryStore:
+        def get(self, _task_id):
+            return task
+
+        def update(self, _task_id, **values):
+            task.update(values)
+            return task
+
+    manager = WrfTaskManager(settings, MemoryStore(), None, FakeHpc())
+    scheduled = []
+    monkeypatch.setattr(manager, "_log", lambda *_args: None)
+    monkeypatch.setattr(manager, "_schedule_reconcile", lambda value: scheduled.append(value))
+
+    manager._defer_external(task_id, HpcError("超算会话重建后仍未进入计算节点 Shell"))
+
+    assert task["status"] == "reconciling"
+    assert task["progress"] == 68
+    assert task["failure"]["failure_class"] == "external"
+    assert task["failure"]["recommended_action"] == "resume"
+    assert scheduled == [task_id]
+
+
+def test_legacy_session_failure_is_exposed_as_resumable_external_failure() -> None:
+    task = WrfTaskManager._decorate_legacy_failure({
+        "id": "wrf_gfs_20260722T000000Z_deadbeef",
+        "status": "failed",
+        "stage": "failed",
+        "error": "超算会话重建后仍未进入计算节点 Shell",
+        "runtime": {"remote_pid": 123},
+    })
+
+    assert task["failure"]["failure_class"] == "external"
+    assert task["failure"]["recommended_action"] == "resume"
+
+
+def test_external_connection_error_pauses_after_timeout(monkeypatch) -> None:
+    task_id = "wrf_gfs_20260722T000000Z_cafebabe"
+    task = {
+        "id": task_id,
+        "status": "reconciling",
+        "stage": "reconciling",
+        "progress": 68,
+        "runtime": {"external_retry_started_at": "2020-01-01T00:00:00Z"},
+        "attempt_no": 1,
+    }
+
+    class MemoryStore:
+        def get(self, _task_id):
+            return task
+
+        def update(self, _task_id, **values):
+            task.update(values)
+            return task
+
+    manager = WrfTaskManager(settings, MemoryStore(), None, FakeHpc())
+    monkeypatch.setattr(manager, "_log", lambda *_args: None)
+    monkeypatch.setattr(manager, "_schedule_reconcile", lambda *_args: pytest.fail("超时后不应再次调度"))
+
+    manager._defer_external(task_id, HpcError("堡垒机连接超时"))
+
+    assert task["status"] == "paused_external"
+    assert task["stage"] == "paused_external"
+
+
+def test_restart_archives_attempt_and_cleans_only_task_paths(monkeypatch) -> None:
+    root = Path("/tmp/zhihuiqixiang-backend-wrf-tests") / uuid.uuid4().hex
+    cfg = replace(settings, data_dir=root / "data", run_dir=root / "runs", database_path=root / "tasks.sqlite3")
+    store = TaskStore(cfg.database_path)
+    task_id = "wrf_gfs_20260722T000000Z_feedface"
+
+    class RestartHpc(FakeHpc):
+        def __init__(self):
+            self.cleaned = []
+
+        def status(self, _task_id):
+            return {"status": "failed", "exit_code": "1", "log": "namelist mismatch"}
+
+        def task_artifact_paths(self, _task_id):
+            return [f"/remote/backend_wrf_tasks/{task_id}", f"/remote/WRF_{task_id}"]
+
+        def cleanup_task_attempt(self, _task_id, *, allow_missing=False):
+            self.cleaned.append((_task_id, allow_missing))
+            return {"status": "failed", "deleted_paths": self.task_artifact_paths(_task_id)}
+
+    try:
+        store.create(task_id, {"physics": {"preset": "old"}})
+        store.update(
+            task_id,
+            status="waiting_restart",
+            stage="failed",
+            progress=68,
+            runtime={"remote_pid": 99, "remote_launch_attempted": True},
+            failure={"failure_class": "configuration", "recommended_action": "edit_and_restart"},
+            error="namelist mismatch",
+        )
+        run_dir = cfg.run_dir / task_id
+        output_dir = cfg.output_dir / "runs" / task_id
+        (run_dir / "raw").mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+        (run_dir / "service.log").write_text("old log", encoding="utf-8")
+        (run_dir / "raw" / "partial").write_text("partial", encoding="utf-8")
+        (output_dir / "scene.meta.json").write_text("{}", encoding="utf-8")
+        hpc = RestartHpc()
+        manager = WrfTaskManager(cfg, store, None, hpc)
+        monkeypatch.setattr(manager, "_log", lambda *_args: None)
+
+        result = manager.restart(
+            task_id,
+            {"physics": {"preset": "new"}},
+            confirm_task_id=task_id,
+            confirm_attempt=1,
+        )
+
+        assert result["id"] == task_id
+        assert result["attempt_no"] == 2
+        assert result["request"]["physics"]["preset"] == "new"
+        assert hpc.cleaned == [(task_id, False)]
+        assert (run_dir / "attempts/001/service.log").read_text(encoding="utf-8") == "old log"
+        assert (run_dir / "raw").is_dir()
+        assert not (run_dir / "raw" / "partial").exists()
+        assert not output_dir.exists()
+        assert store.attempts(task_id)[0]["attempt_no"] == 1
+    finally:
+        store.close()
+
+
+def test_restart_plan_refuses_running_remote_task() -> None:
+    task_id = "wrf_gfs_20260722T000000Z_1234abcd"
+    task = {
+        "id": task_id,
+        "status": "waiting_restart",
+        "stage": "failed",
+        "progress": 68,
+        "runtime": {"remote_pid": 123, "remote_launch_attempted": True},
+        "attempt_no": 1,
+        "request": {},
+    }
+
+    class MemoryStore:
+        def get(self, _task_id):
+            return task
+
+    class RunningHpc(FakeHpc):
+        def task_artifact_paths(self, _task_id):
+            return [f"/remote/WRF_{task_id}"]
+
+    manager = WrfTaskManager(settings, MemoryStore(), None, RunningHpc())
+    plan = manager.restart_plan(task_id)
+
+    assert plan["can_restart"] is False
+    assert plan["remote_status"] == "running"
+    assert "仍在运行" in plan["reason"]
 
 
 def test_delete_local_removes_final_task_data() -> None:

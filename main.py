@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -13,7 +13,15 @@ from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError
 from recommendations import RecommendationManager
-from schemas import HpcAuthRequest, RemoteGfsCleanupRequest, RemoteGfsTriggerRequest, TaskDeleteRequest, WrfRecommendationRequest, WrfTaskCreate
+from schemas import (
+    HpcAuthRequest,
+    RemoteGfsCleanupRequest,
+    RemoteGfsTriggerRequest,
+    TaskDeleteRequest,
+    WrfRecommendationRequest,
+    WrfTaskCreate,
+    WrfTaskRestartRequest,
+)
 from task_manager import TaskConflictError, TaskNotFoundError, WrfTaskManager
 
 
@@ -46,11 +54,11 @@ app = FastAPI(
 install_auth(
     app,
     [
-        ("/api/wrf/tasks", 2),
-        ("/api/wrf/data-status", 2),
-        ("/api/wrf/gfs", 2),
-        ("/api/wrf/recommendations", 2),
-        ("/api/wrf/options", 2),
+        ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2}),
+        ("/api/wrf/data-status", {"GET": 1, "*": 2}),
+        ("/api/wrf/gfs", {"GET": 1, "*": 2}),
+        ("/api/wrf/recommendations", {"GET": 1, "*": 2}),
+        ("/api/wrf/options", {"GET": 1, "*": 2}),
         ("/api/wrf/hpc", 2),
         ("/api/wrf/display", 1),
         ("/data/WRF/", 1),
@@ -76,6 +84,20 @@ def get_task(task_id: str) -> dict[str, Any]:
         return task_manager.get(task_id)
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+
+
+def _viewer(request: Request) -> tuple[str, int]:
+    user = getattr(request.state, "user", None) or {}
+    return str(user.get("sub") or ""), int(user.get("role") or 0)
+
+
+def get_visible_task(task_id: str, request: Request) -> dict[str, Any]:
+    task = get_task(task_id)
+    owner_sub, role = _viewer(request)
+    if role >= 3 or (owner_sub and task.get("owner_sub") == owner_sub):
+        return task
+    # 旧任务没有可验证的归属，只向系统管理员开放，避免普通用户越权读取。
+    raise HTTPException(status_code=404, detail="WRF 任务不存在")
 
 
 @app.get("/")
@@ -228,13 +250,14 @@ def recommendation_detail(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/wrf/tasks", status_code=202)
-def create_task(request: WrfTaskCreate) -> dict[str, Any]:
+def create_task(payload: WrfTaskCreate, request: Request) -> dict[str, Any]:
     hpc = task_manager.hpc_health
     if hpc.get("status") != "ready":
         hpc = task_manager.refresh_hpc_health()
     if hpc.get("status") != "ready":
         raise HTTPException(status_code=503, detail=f"超算环境未就绪：{hpc.get('message') or hpc.get('status')}")
-    task = task_manager.submit(request.model_dump(mode="json"))
+    owner_sub, _ = _viewer(request)
+    task = task_manager.submit(payload.model_dump(mode="json"), owner_sub)
     return ok(task, message="WRF 任务已进入并行队列")
 
 
@@ -256,19 +279,21 @@ def authenticate_hpc(request: HpcAuthRequest) -> dict[str, Any]:
 
 
 @app.get("/api/wrf/tasks")
-def list_tasks(limit: int = 50) -> dict[str, Any]:
-    return ok({"items": task_manager.list(limit), "queue_size": task_manager.queue_size})
+def list_tasks(request: Request, limit: int = 50) -> dict[str, Any]:
+    owner_sub, role = _viewer(request)
+    return ok({"items": task_manager.list(limit, None if role >= 3 else owner_sub), "queue_size": task_manager.queue_size})
 
 
 @app.get("/api/wrf/tasks/{task_id}")
-def task_detail(task_id: str) -> dict[str, Any]:
-    return ok(get_task(task_id))
+def task_detail(task_id: str, request: Request) -> dict[str, Any]:
+    return ok(get_visible_task(task_id, request))
 
 
 @app.delete("/api/wrf/tasks/{task_id}")
-def delete_task(task_id: str, request: TaskDeleteRequest) -> dict[str, Any]:
+def delete_task(task_id: str, payload: TaskDeleteRequest, request: Request) -> dict[str, Any]:
     try:
-        result = task_manager.delete_local(task_id, request.confirm_task_id)
+        get_visible_task(task_id, request)
+        result = task_manager.delete_local(task_id, payload.confirm_task_id)
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
     except TaskConflictError as exc:
@@ -279,31 +304,89 @@ def delete_task(task_id: str, request: TaskDeleteRequest) -> dict[str, Any]:
 
 
 @app.get("/api/wrf/tasks/{task_id}/logs")
-def task_logs(task_id: str, after: int = 0, limit: int = 65536) -> dict[str, Any]:
+def task_logs(
+    task_id: str,
+    request: Request,
+    after: int = 0,
+    limit: int = 65536,
+    attempt_no: int | None = None,
+) -> dict[str, Any]:
     try:
-        return ok(task_manager.logs(task_id, after, limit))
+        get_visible_task(task_id, request)
+        return ok(task_manager.logs(task_id, after, limit, attempt_no))
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
 
 
 @app.post("/api/wrf/tasks/{task_id}/cancel")
-def cancel_task(task_id: str) -> dict[str, Any]:
+def cancel_task(task_id: str, request: Request) -> dict[str, Any]:
     try:
+        get_visible_task(task_id, request)
         return ok(task_manager.cancel(task_id), message="取消请求已处理")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
 
 
 @app.post("/api/wrf/tasks/{task_id}/retry", status_code=202)
-def retry_task(task_id: str) -> dict[str, Any]:
+def retry_task(task_id: str, request: Request) -> dict[str, Any]:
     try:
-        return ok(task_manager.retry(task_id), message="已基于原参数创建新任务")
+        get_visible_task(task_id, request)
+        return ok(task_manager.retry(task_id), message="已在原任务中开始新的运行尝试")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/wrf/tasks/{task_id}/restart-plan")
+def task_restart_plan(task_id: str, request: Request) -> dict[str, Any]:
+    try:
+        get_visible_task(task_id, request)
+        return ok(task_manager.restart_plan(task_id))
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HpcError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/restart", status_code=202)
+def restart_task(task_id: str, payload: WrfTaskRestartRequest, request: Request) -> dict[str, Any]:
+    try:
+        get_visible_task(task_id, request)
+        task = task_manager.restart(
+            task_id,
+            payload.request.model_dump(mode="json"),
+            confirm_task_id=payload.confirm_task_id,
+            confirm_attempt=payload.confirm_attempt,
+        )
+        return ok(task, message="已归档旧尝试并在原任务中重新开始")
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HpcError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/resume", status_code=202)
+def resume_task(task_id: str, request: Request) -> dict[str, Any]:
+    try:
+        get_visible_task(task_id, request)
+        return ok(task_manager.resume_external(task_id), message="已从原任务阶段开始超算对账")
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/wrf/tasks/{task_id}/retry-outputs", status_code=202)
-def retry_task_outputs(task_id: str) -> dict[str, Any]:
+def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
     hpc = task_manager.hpc_health
     if hpc.get("status") != "ready":
         raise HTTPException(
@@ -311,6 +394,7 @@ def retry_task_outputs(task_id: str) -> dict[str, Any]:
             detail=f"超算环境未就绪：{hpc.get('message') or hpc.get('status')}，请先完成超算认证",
         )
     try:
+        get_visible_task(task_id, request)
         return ok(task_manager.retry_outputs(task_id), message="已加入结果下载恢复队列")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -319,8 +403,9 @@ def retry_task_outputs(task_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/wrf/tasks/{task_id}/render-partial", status_code=202)
-def render_partial_outputs(task_id: str) -> dict[str, Any]:
+def render_partial_outputs(task_id: str, request: Request) -> dict[str, Any]:
     try:
+        get_visible_task(task_id, request)
         return ok(task_manager.render_partial(task_id), message="已确认忽略坏帧并加入部分渲染队列")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -329,16 +414,17 @@ def render_partial_outputs(task_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/wrf/tasks/{task_id}/result")
-def task_result(task_id: str) -> dict[str, Any]:
-    task = get_task(task_id)
+def task_result(task_id: str, request: Request) -> dict[str, Any]:
+    task = get_visible_task(task_id, request)
     if task["status"] not in {"succeeded", "partial_success"} or not task.get("result"):
         raise HTTPException(status_code=409, detail={"message": "WRF 任务尚未完成", "status": task["status"]})
     return ok(task["result"])
 
 
 @app.get("/api/wrf/display")
-def display(task_id: str | None = None) -> dict[str, Any]:
-    task = get_task(task_id) if task_id else store.latest_success()
+def display(request: Request, task_id: str | None = None) -> dict[str, Any]:
+    owner_sub, role = _viewer(request)
+    task = get_visible_task(task_id, request) if task_id else store.latest_success(None if role >= 3 else owner_sub)
     if task is None:
         return ok(None, message="暂无成功的 WRF 任务")
     if task["status"] not in {"succeeded", "partial_success"} or not task.get("result"):

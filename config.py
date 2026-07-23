@@ -54,6 +54,12 @@ class Settings:
     hpc_server_index: str = os.getenv("WRF_HPC_SERVER_INDEX", "4").strip()
     hpc_account_index: str = os.getenv("WRF_HPC_ACCOUNT_INDEX", "2").strip()
     hpc_poll_seconds: int = max(5, int(os.getenv("WRF_HPC_POLL_SECONDS", "15")))
+    hpc_reconcile_interval_seconds: int = max(
+        5, int(os.getenv("WRF_HPC_RECONCILE_INTERVAL_SECONDS", "30"))
+    )
+    hpc_reconcile_timeout_seconds: int = max(
+        60, int(os.getenv("WRF_HPC_RECONCILE_TIMEOUT_SECONDS", "1800"))
+    )
     hpc_connect_timeout: int = max(5, int(os.getenv("WRF_HPC_CONNECT_TIMEOUT", "20")))
     hpc_shell_ready_timeout: int = max(10, int(os.getenv("WRF_HPC_SHELL_READY_TIMEOUT", "60")))
     hpc_connect_retries: int = max(1, min(10, int(os.getenv("WRF_HPC_CONNECT_RETRIES", "3"))))
