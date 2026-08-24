@@ -1,83 +1,97 @@
 # backend_wrf
 
-智慧气象的独立 WRF 微服务，负责调度超算共享 GFS 0.25° 完整文件池、超算 WPS/WRF 并行任务和 WebP 结果发布。
+智慧气象的独立 WRF 微服务。后端保留在本机，GFS 数据与 WPS/WRF 计算通过 SSH 直连 `tx-lab@10.255.248.88:1301` 完成，结果拉回本机后发布 WebP。
+
+## 当前运行拓扑
+
+- 本机：FastAPI、SQLite 任务状态、结果下载、渲染与 `/data/WRF` 发布。
+- tx-lab NVMe：`/home/tx-lab/WRFwork/RUNTIME` 存任务运行目录，`/home/tx-lab/WRFwork/DATA/GFS_CHINA` 存中国区域 GFS 数据池。
+- 不自动挂载或写入旧 `/mnt/wrf-data`；该设备恢复前保持原状。
+- WPS：`/home/tx-lab/WRFwork/WPS/WPS-4.6.0-nvhpc`。
+- CPU WRF：`/home/tx-lab/WRFwork/WRF_BUILD/WRF_CPU`。
+- WPS_GEOG：`/home/tx-lab/WRFwork/DATA/WPS_GEOG/WPS_GEOG`。
+- NVHPC 环境：`/home/tx-lab/WRFwork/env_wrf_nvhpc.sh`。
+
+服务按任务动态创建独立执行线程，不设置应用层并发上限；任务目录、状态和输出彼此隔离，共享 GFS 周期准备与 SSH 会话操作仍通过锁协调。现阶段新建、未启动和重跑任务统一使用 CPU 与 6 小时 spin-up，CPU 默认 4 个 MPI 进程；已经在远端运行的历史任务保留原运行配置并继续对账。
+
+## 首次启用前的人工配置
+
+服务不接收、不保存也不自动填写 tx-lab 密码。密码仅用于管理员人工 SSH 登录和首次安装公钥。
+
+### 1. 系统盘数据池检查
+
+中国区域数据池使用 tx-lab 系统盘。服务启动前确认目标目录可写，且所在文件系统至少有 120 GB 可用空间：
+
+```bash
+mkdir -p /home/tx-lab/WRFwork/DATA/GFS_CHINA
+findmnt -T /home/tx-lab/WRFwork/DATA/GFS_CHINA
+df -h /home/tx-lab/WRFwork/DATA/GFS_CHINA
+test -w /home/tx-lab/WRFwork/DATA/GFS_CHINA
+```
+
+低于阈值时后台预取停止并报告存储不足，不会回退到旧外置盘。
+
+### 2. 安装专用 SSH 密钥
+
+在运行 `backend_wrf` 的本机账号下创建专用密钥并保存独立 known-hosts。首次复制公钥时由管理员手工输入 tx-lab 密码：
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_wrf_txlab -C backend_wrf@tx-lab
+ssh-keyscan -p 1301 -t ed25519 10.255.248.88 > ~/.ssh/known_hosts_wrf_txlab
+ssh-keygen -lf ~/.ssh/known_hosts_wrf_txlab
+ssh-copy-id -i ~/.ssh/id_ed25519_wrf_txlab.pub -p 1301 tx-lab@10.255.248.88
+ssh -i ~/.ssh/id_ed25519_wrf_txlab -o BatchMode=yes \
+  -o UserKnownHostsFile=~/.ssh/known_hosts_wrf_txlab \
+  -p 1301 tx-lab@10.255.248.88 'printf WRF_TXLAB_READY'
+```
+
+`ssh-keyscan` 的指纹必须通过可信渠道与服务器实际主机密钥比对后才能使用。
 
 ## 启动
 
 ```bash
 python -m pip install -r requirements.txt
 export JWT_SECRET="与 backend_auth 一致的密钥"
-export WRF_HPC_HOST="chaosuan"
-export WRF_HPC_USER="xjm_shaoyongjin"
-export WRF_HPC_CONNECTION_MODE="bastion"
-export WRF_HPC_AUTH_MODE="key"
-export WRF_HPC_KEY_FILE="/path/to/private_key" # 使用 ssh-agent 时可省略
 python main.py
 ```
 
-默认监听 `http://127.0.0.1:8007`，接口文档位于 `/docs`。服务只支持 GFS 驱动与超算执行，任务采用 SQLite 持久化和最多 3 个工作线程并行调度。
-
-未配置可用密钥时，工作台会在提交任务前提示输入超算密码。密码只保存在
-`backend_wrf` 当前进程内存中，不会写入 SQLite、任务配置或日志；服务重启后需重新认证。
-堡垒机模式保持一个串行复用的 `pexpect` TTY，会自动完成服务器与账号菜单选择；
-根目录的 `start.sh` 会在变更任何服务进程前检查并自动安装 `pexpect`。
-项目不再提供单独的 WRF 重启脚本。需要完整重启时，在根目录依次执行
-`./stop.sh` 和 `./start.sh`；不要停止归属不明的端口进程。
+默认监听 `http://127.0.0.1:8007`，接口文档位于 `/docs`。完整重启仍使用项目根目录的 `./stop.sh` 和 `./start.sh`；不要停止归属不明的端口进程。
 
 ## 主要配置
 
-- `WRF_PORT`：默认 `8007`
-- `WRF_MAX_CONCURRENT_TASKS`：完整任务并行上限，默认 `3`，允许 `1-4`
-- `WRF_RUN_DATA_DIR`：任务、日志与原始 wrfout 根目录
-- `WRF_HPC_REMOTE_DIR`：超算 WRF 工作根目录，默认 `~/WRFwork`
-- `WRF_HPC_GFS_DIR`：超算 GFS 缓存根目录，默认 `~/Data/gfsdata`
-- `WRF_HPC_GFS_DOWNLOAD_SCRIPT`：超算完整 GFS 下载脚本，默认 `~/Data/gfsdata/download_gfs_00z.sh`，调用契约为 `脚本 YYYYMMDD`；脚本自身固定下载该日 00Z 的 f000-f072
-- `WRF_HPC_GFS_WAIT_SECONDS`：任务等待共享周期补齐的上限，默认 `5400` 秒
-- `WRF_HPC_GFS_POLL_SECONDS`：共享数据池轮询间隔，默认 `30` 秒
-- `WRF_HPC_GFS_FULL_MIN_BYTES`：拒绝旧筛选文件的单文件最小大小，默认 `100 MiB`
-- `WRF_HPC_WPS_SOURCE_DIR` / `WRF_HPC_WRF_SOURCE_DIR`：超算 WPS/WRF 安装目录
-- `WRF_HPC_GEOG_DATA_PATH`：超算 WPS_GEOG 目录
-- `WRF_HPC_CONNECTION_MODE`：默认 `bastion`；仅直连计算节点时设为 `direct`
-- `WRF_HPC_TRANSFER_MODE`：默认 `pty`，沿用 `wrfautosystem` 的堡垒机 TTY/base64 断点传输；仅在确认堡垒机开放 SFTP subsystem 时才显式设为 `auto` 或 `sftp`
-- `WRF_HPC_TRANSFER_RETRIES`：PTY 传输中断后的自动重连续传次数，默认 `5`
-- `WRF_HPC_TRANSFER_CHUNK_KB`：PTY 单块大小，默认 `256` KiB
-- `WRF_HPC_TRANSFER_CHUNK_TIMEOUT`：PTY 单块确认超时，默认 `90` 秒
-- `WRF_HPC_DOWNLOAD_CHUNK_MB`：wrfout 经堡垒机回传的断点块大小，默认 `8` MiB，可在 `1`–`32` MiB 间调整
-- `WRF_HPC_IMPORT_LEGACY_GFS`：兼容保留、默认 `0`；完整文件模式不会凭文件头、大小和 SHA256 导入来源不明的旧筛选文件
-- `WRF_HPC_SERVER_INDEX`：堡垒机服务器菜单选项，默认 `4`（`log04 / 172.18.1.178`）
-- `WRF_HPC_ACCOUNT_INDEX`：堡垒机账户菜单选项，默认 `2`（`self`）
-- `WRF_HPC_SHELL_READY_TIMEOUT`：选择计算节点后等待 Shell 就绪的秒数，默认 `60`
-- `WRF_HPC_CONNECT_RETRIES`：堡垒机或计算节点 Shell 初始化总尝试次数，默认 `3`
-- `WRF_HPC_CONNECT_RETRY_DELAY_SECONDS`：连接重试的基础等待秒数，默认 `2`
-- `WRF_HPC_RECONCILE_INTERVAL_SECONDS`：外部连接中断后的远端对账间隔，默认 `30` 秒
-- `WRF_HPC_RECONCILE_TIMEOUT_SECONDS`：自动对账窗口，默认 `1800` 秒；超时后任务暂停等待重新认证，不会判为模型失败
-- `WRF_HPC_AUTH_MODE`：推荐 `key`；兼容工作台临时密码认证或服务端环境变量密码
+- `WRF_PORT`：默认 `8007`。
+- 任务调度固定为 `dynamic`，不再读取 `WRF_MAX_CONCURRENT_TASKS`。
+- `WRF_HPC_HOST` / `WRF_HPC_PORT` / `WRF_HPC_USER`：默认 `10.255.248.88` / `1301` / `tx-lab`。
+- `WRF_HPC_CONNECTION_MODE` / `WRF_HPC_AUTH_MODE`：默认 `direct` / `key`。
+- `WRF_HPC_KEY_FILE`：默认 `~/.ssh/id_ed25519_wrf_txlab`。
+- `WRF_HPC_KNOWN_HOSTS_FILE`：默认 `~/.ssh/known_hosts_wrf_txlab`，严格校验主机密钥。
+- `WRF_HPC_REMOTE_DIR`：默认 `/home/tx-lab/WRFwork/RUNTIME`。
+- `WRF_HPC_GFS_MOUNT` / `WRF_HPC_GFS_DIR`：默认 `/` / `/home/tx-lab/WRFwork/DATA/GFS_CHINA`。
+- `WRF_HPC_GFS_REGION_WEST/EAST/SOUTH/NORTH`：默认 `65` / `145` / `5` / `60`，任务 D01 加 1° 缓冲必须完全落在该范围内。
+- `WRF_HPC_GFS_PUBLICATION_LAG_HOURS`：默认 `8`；UTC 00:00–07:59 使用前一日 00Z，避免选择尚未完整发布 f072 的周期。
+- `WRF_HPC_GFS_PREFETCH_ENABLED`：默认开启；后端启动后持续检查并触发最新 00Z 的超算后台下载。
+- `WRF_HPC_GFS_PREFETCH_INTERVAL_SECONDS` / `WRF_HPC_GFS_PREFETCH_START_DELAY_SECONDS`：默认 `300` / `15` 秒；分别控制后台复查间隔和服务启动后的首次检查延迟。
+- `WRF_HPC_GFS_RETAINED_CYCLES`：默认 `2`；最近两个 00Z 与活动任务周期受保护，不进入清理候选。
+- `WRF_HPC_GFS_REQUEST_INTERVAL_SECONDS`：默认且最小 `10` 秒，遵守 NOMADS Grib Filter 脚本请求间隔。
+- `WRF_HPC_GFS_MIN_SPEED_BPS` / `WRF_HPC_GFS_SLOW_SECONDS`：默认 `65536` B/s / `120` 秒；持续低速时保留断点并重试。
+- `WRF_HPC_GFS_WAIT_SECONDS` / `WRF_HPC_GFS_POLL_SECONDS`：默认 `5400` / `30` 秒。
+- `WRF_HPC_GFS_DOWNLOAD_WORKERS`：兼容配置，区域下载固定串行，默认 `1`。
+- `WRF_HPC_GFS_FULL_MIN_BYTES`：单个区域 GRIB 最小 `1 MiB`。
+- `WRF_HPC_GFS_MIN_FREE_GB`：系统盘最低可用空间，默认 `120` GB。
+- `WRF_HPC_RUNTIME_MIN_FREE_GB`：启动任务前 NVMe 最低可用空间，默认 `110` GB。
+- `WRF_HPC_RUNTIME_PRE_WRF_MIN_FREE_GB`：进入 real/wrf 前最低可用空间，默认 `40` GB。
+- `WRF_HPC_CPU_MPI_PROCESSES`：默认 `4`。
+- CPU 构建根目录中的可执行文件统一取自标准位置 `main/real.exe` 与 `main/wrf.exe`，不依赖 `run/` 软链接。
+- 新建和重跑接口不再接收运行配置、预报关注点与 spin-up 选项；后端统一持久化为 CPU、通用预报和 6 小时 spin-up。
 
-GFS GRIB 统一保存在超算共享数据池。进入工作台并完成临时密码认证后，服务会幂等
-触发 UTC 当天及前一天两个 00Z 周期补齐至 f072；任务只在超算周期目录检查 GRIB
-首尾标记、完整文件最小大小、Manifest 和 SHA256，并让同周期任务共享下载进程。
-取消某个 WRF 任务只结束该任务的等待，不会杀死共享下载。小型 `gfs.expected.tsv`
-随任务配置提交到超算，`wrfout` 完成后再拉回本机渲染。
+## GFS 与数据保留
 
-工作台显示超算周期的文件数、容量、状态和绝对路径。仅当最近两个目标周期均达到
-73/73 时，旧周期才会成为清理候选；下载中周期和运行中任务使用的周期始终受保护。
-远端清理必须由用户在界面核对精确路径并当次确认，不会在认证或服务启动时静默执行。
+工作台使用 NOAA NOMADS Grib Filter，按 `65–145°E、5–60°N` 直接获取 0.25°、全部层次和变量的 f000–f072，共 73 个区域 GRIB。请求严格串行且间隔至少 10 秒，使用 `.part.nomads` 断点文件；校验 GRIB 首尾标记和最小大小后再原子落盘。同一时刻只允许一个共享下载进程。
 
-任务会区分模型/参数、外部连接、驱动数据和结果恢复故障。堡垒机、认证或网络中断时，
-任务保留原进度并进入远端对账；远端仍运行则继续监控，已完成则直接恢复结果下载。
-自动对账超时后只进入 `paused_external`，重新认证即可继续。模型或参数失败进入
-`waiting_restart`，用户可在原配置上修改参数；提交前接口会返回待清理的精确路径，
-确认后仅清理该任务的 WPS/WRF/日志残片，并在相同任务 ID 下增加尝试次数。旧尝试
-日志和诊断会归档，本地与超算共享 GFS 数据池不会随任务重跑清理。
+后端默认每 5 分钟检查最近两个可用 00Z，并按从旧到新的顺序在 tx-lab 端以 `nohup` 补齐。已经触发的下载由 tx-lab 进程持有，关闭网页或短暂重启本地后端不会中断；本地后端恢复后会继续发现和触发后续新周期。任务处于 GFS 准备阶段时，后台周期预取暂停让路；任务历史周期只下载实际需要的时次，后台保留周期则完整预取 f000–f072。系统盘低于保护阈值时停止新下载。可通过健康接口的 `gfs.prefetch` 查看最近一次后台检查状态。
 
-新任务可显式选择 `off/auto/custom` spin-up。`start_time` 始终表示产品起报时刻，
-模型从更早的 `model_start` 开始，`history_begin` 保证产品只发布起报后的帧。自动
-规则通常选择 6 小时；强对流、城市、降雪、≤3 km 网格或复杂地形建议 12 小时。
-FDDA 仅在 spin-up 阶段作用于 ≥9 km 域，不松弛水汽和边界层，结束前 60 分钟渐退。
+远端共享数据池始终保留上述 73 个逐小时文件；单个 WRF 任务可独立选择 `1/3/6` 小时边界场间隔，默认 `1` 小时。任务只校验和链接所选间隔对应的预报时次，`interval_seconds` 与该选择保持一致。
 
-工作台通过 `POST /api/wrf/recommendations` 和对应 GET 接口在超算运行/复用 WPS
-`geogrid`，根据地形、陆水/城市比例、经纬度、季节、关注点和网格距给出可确认的
-规则建议。输出下载前会在超算执行 NetCDF 完整性检查；默认严格失败，也可由用户
-确认忽略坏帧生成 `partial_success`，质量告警、排除帧和缺失时次写入 `scene.meta.json`。
+同步最新 00Z 或任务准备数据时，系统会自动清理严格早于目标周期的受管 GFS 周期目录，然后重试一次下载。目标周期、更新周期、下载中的周期以及活动任务正在使用的周期不会自动删除；不满足自动清理条件的路径仍需在界面人工确认。远端任务断点、wrfout、历史运行结果和本地已发布产品始终保留，取消或重跑任务也不会删除这些数据。
 
-生产反向代理应将 `/api/wrf` 与 `/data/WRF` 转发到本服务。GFS、wrfout 和 WebP 结果均不应提交到 Git。
+生产反向代理应将 `/api/wrf` 与 `/data/WRF` 转发到本服务。GFS、wrfout、WebP 结果及密钥不得提交到 Git。

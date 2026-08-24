@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
+
+
+FIXED_RUNTIME_PROFILE = "cpu"
+FIXED_SPINUP_HOURS = 6
+FIXED_FORECAST_FOCUS = "general"
+
+
+def normalize_task_request(request: dict) -> dict:
+    """Inject the current fixed execution policy into persisted task requests."""
+    normalized = dict(request)
+    normalized["runtime_profile"] = FIXED_RUNTIME_PROFILE
+    normalized["spinup"] = {"mode": "custom", "hours": FIXED_SPINUP_HOURS}
+    normalized["forecast_focus"] = FIXED_FORECAST_FOCUS
+    return normalized
 
 
 class Center(BaseModel):
@@ -61,29 +76,14 @@ class PhysicsConfig(BaseModel):
         return self
 
 
-class SpinupConfig(BaseModel):
-    mode: Literal["off", "auto", "custom"] = "off"
-    hours: Literal[0, 3, 6, 12, 18, 24] | None = None
-
-    @model_validator(mode="after")
-    def validate_hours(self):
-        if self.mode == "custom" and self.hours is None:
-            raise ValueError("自定义 spin-up 必须指定小时数")
-        if self.mode == "off":
-            self.hours = 0
-        return self
-
-
 class WrfTaskCreate(BaseModel):
     start_time: datetime
     end_time: datetime
     center: Center
-    forecast_interval_hours: Literal[1, 3, 6, 12, 24] = 1
+    forecast_interval_hours: Literal[1, 3, 6] = 1
     domains: list[DomainConfig]
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
     assimilation_scheme: Literal["off", "fdda_weak", "fdda_standard", "fdda_strong"] = "off"
-    forecast_focus: Literal["general", "convection", "temperature_wind", "urban", "snowfall"] = "general"
-    spinup: SpinupConfig = Field(default_factory=SpinupConfig)
 
     @model_validator(mode="after")
     def validate_request(self):
@@ -155,24 +155,24 @@ class WrfTaskCreate(BaseModel):
                 raise ValueError("逐域城市冠层方案数量必须与嵌套域数量一致")
             if any(value not in {0, 1} for value in self.physics.sf_urban_physics_by_domain):
                 raise ValueError("逐域城市冠层方案仅支持 0 或 1")
-        if self.spinup.mode == "custom":
-            spinup_hours = int(self.spinup.hours or 0)
-            if spinup_hours % self.forecast_interval_hours:
-                raise ValueError("自定义 spin-up 必须与 GFS 文件间隔对齐")
-        elif self.spinup.mode == "auto":
-            base = 12 if self.forecast_focus in {"convection", "urban", "snowfall"} or min(
-                domain.dx for domain in self.domains
-            ) <= 3000 else 6
-            spinup_hours = next(
-                (value for value in (6, 12, 18, 24) if value >= base and value % self.forecast_interval_hours == 0),
-                24,
-            )
-        else:
-            spinup_hours = 0
-        model_start = start - timedelta(hours=spinup_hours)
+        model_start = start - timedelta(hours=FIXED_SPINUP_HOURS)
         cycle_start = model_start.replace(hour=0, minute=0, second=0, microsecond=0)
         if (end - cycle_start).total_seconds() / 3600 + 6 > 72:
             raise ValueError("模拟窗口、spin-up 与 6 小时边界缓冲超出 GFS f000-f072")
+        outer = self.domains[0]
+        meters_per_degree = 111_320.0
+        longitude_scale = meters_per_degree * max(0.1, math.cos(math.radians(self.center.lat)))
+        half_width = (outer.e_we - 1) * outer.dx / longitude_scale / 2
+        half_height = (outer.e_sn - 1) * outer.dy / meters_per_degree / 2
+        safety_margin = 1.0
+        west = self.center.lon - half_width - safety_margin
+        east = self.center.lon + half_width + safety_margin
+        south = self.center.lat - half_height - safety_margin
+        north = self.center.lat + half_height + safety_margin
+        if west < 65 or east > 145 or south < 5 or north > 60:
+            raise ValueError(
+                "D01（含 1° 边界缓冲）超出中国区域 GFS 覆盖范围：65°E–145°E、5°N–60°N"
+            )
         return self
 
 
@@ -202,7 +202,6 @@ class RemoteGfsTriggerRequest(BaseModel):
 class WrfRecommendationRequest(BaseModel):
     center: Center
     domains: list[DomainConfig]
-    forecast_focus: Literal["general", "convection", "temperature_wind", "urban", "snowfall"] = "general"
     start_time: datetime
 
     @model_validator(mode="after")

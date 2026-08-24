@@ -2,7 +2,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
-data/gfs/
 data/runs/
 data/*.sqlite3
 data/*.sqlite3-*
+.DS_Store
+data/WRF/runs/
+*.webp
+*.nc
+wrfout*
+wrfrst*

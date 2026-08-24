@@ -193,6 +193,17 @@ load_runtime_environment() {
         return 0
     fi
     configure_runtime_stack || return 1
+    if [ -n "${WRF_RUNTIME_ENV:-}" ]; then
+        if [ ! -r "${WRF_RUNTIME_ENV}" ]; then
+            log_error "tx-lab 运行环境脚本不存在: ${WRF_RUNTIME_ENV}"
+            return 1
+        fi
+        # tx-lab 已验证的 NVHPC/NetCDF/HDF5/OpenMPI 环境。
+        # shellcheck disable=SC1090
+        source "${WRF_RUNTIME_ENV}"
+        export WRF_RUNTIME_ENV_LOADED="true"
+        return 0
+    fi
     if ! command -v module &> /dev/null; then
         [ -r /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
         [ -r /usr/share/Modules/init/bash ] && . /usr/share/Modules/init/bash
@@ -213,14 +224,14 @@ load_runtime_environment() {
 }
 
 preflight_hpc_runtime() {
-    log_info "开始超算 WRF 运行环境预检"
+    log_info "开始 tx-lab WRF 运行环境预检"
     if [ "${WRF_RUNTIME:-hpc}" != "hpc" ]; then
         log_error "远端入口要求 WRF_RUNTIME=hpc"
         return 1
     fi
     load_runtime_environment || return 1
     local missing=0 command_name
-    for command_name in bash awk sed grep wc date mpirun ncdump; do
+    for command_name in bash awk sed grep wc date tar mpirun ncdump; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             log_error "预检缺少命令: ${command_name}"
             missing=$((missing + 1))
@@ -241,18 +252,36 @@ preflight_hpc_runtime() {
         "${WPS_SOURCE_DIR}/geogrid.exe" \
         "${WPS_SOURCE_DIR}/ungrib.exe" \
         "${WPS_SOURCE_DIR}/metgrid.exe" \
-        "${WRF_SOURCE_DIR}/run/real.exe" \
-        "${WRF_SOURCE_DIR}/run/wrf.exe"; do
+        "${WRF_SOURCE_DIR}/main/real.exe" \
+        "${WRF_SOURCE_DIR}/main/wrf.exe"; do
         if [ ! -x "$required_file" ]; then
             log_error "预检可执行文件不存在或不可执行: ${required_file}"
             missing=$((missing + 1))
         fi
     done
+    if ldd "${WRF_SOURCE_DIR}/main/real.exe" "${WRF_SOURCE_DIR}/main/wrf.exe" 2>/dev/null | grep -q 'not found'; then
+        log_error "WRF ${WRF_RUNTIME_PROFILE:-cpu} 可执行文件存在未解析动态库"
+        missing=$((missing + 1))
+    fi
+    if [ "${WRF_RUNTIME_PROFILE:-cpu}" = "gpu" ]; then
+        local gpu_count
+        gpu_count=$(nvidia-smi -L 2>/dev/null | wc -l)
+        if [ "$gpu_count" -lt "${WRF_GPU_MPI_PROCESSES:-1}" ]; then
+            log_error "GPU 数量不足: ${gpu_count}/${WRF_GPU_MPI_PROCESSES:-1}"
+            missing=$((missing + 1))
+        fi
+    fi
+    local runtime_free_gb
+    runtime_free_gb=$(df -Pk "${WORK_DIR}" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
+    if ! [[ "$runtime_free_gb" =~ ^[0-9]+$ ]] || [ "$runtime_free_gb" -lt "${WRF_RUNTIME_MIN_FREE_GB:-110}" ]; then
+        log_error "NVMe 可用空间不足: ${runtime_free_gb:-unknown}GB < ${WRF_RUNTIME_MIN_FREE_GB:-110}GB (${WORK_DIR})"
+        missing=$((missing + 1))
+    fi
     if [ "$missing" -ne 0 ]; then
-        log_error "超算 WRF 环境预检失败，共 ${missing} 项异常"
+        log_error "tx-lab WRF 环境预检失败，共 ${missing} 项异常"
         return 1
     fi
-    log_info "超算 WRF 环境预检通过"
+    log_info "tx-lab WRF 环境预检通过"
 }
 
 resolve_grib_filter() {
@@ -740,14 +769,14 @@ step1_forecast_data_preparation() {
     if [ "${WRF_RUNTIME:-hpc}" = "macos" ]; then
         log_info "${provider_upper} 数据由 Web 服务下载并保存在本机数据池；本机运行不会上传任何文件"
     else
-        log_info "${provider_upper} 数据由超算共享下载脚本准备；Web 服务只检查并等待数据池"
+        log_info "${provider_upper} 数据由 tx-lab 共享下载脚本准备；Web 服务只检查并等待数据池"
     fi
     log_info "需要的 forecast hours: ${forecast_hours}"
     log_info "预报缓存模式: ${WRF_GFS_CACHE_MODE:-${WRF_EC_CACHE_MODE:-global_cycle_fhour}}"
 
     if [ ! -d "$data_dir" ]; then
         log_error "${provider_upper}缓存目录不存在: ${data_dir}"
-        log_error "请先运行超算共享下载脚本并校验完整预报文件到该缓存目录"
+        log_error "请先运行 tx-lab 共享下载脚本并校验完整预报文件到该缓存目录"
         write_stage "failed" "error" "${provider_upper}缓存目录不存在: ${data_dir}"
         exit 1
     fi
@@ -881,7 +910,7 @@ step1_ec_data_preparation() { step1_forecast_data_preparation ec; }
 # 创建带时间特征命名的 WRF/WPS 工作目录
 #===============================================================================
 step2_environment_setup() {
-    log_step "步骤2: 环境搭建 - 加载环境、创建工作目录、复制模型源码"
+    log_step "步骤2: 环境搭建 - 加载环境、创建最小运行目录"
 
     # 1. 加载运行环境
     log_info "加载编译和运行环境..."
@@ -919,11 +948,15 @@ step2_environment_setup() {
         ln -sf "${WPS_INSTALL_DIR}/bin/metgrid" "${WPS_WORK_DIR}/metgrid.exe"
         ln -sf "${WPS_INSTALL_DIR}/bin/link_grib.csh" "${WPS_WORK_DIR}/link_grib.csh"
     elif [ -d "${WPS_SOURCE_DIR}" ]; then
-        cp -r ${WPS_SOURCE_DIR}/* ${WPS_WORK_DIR}/
-        check_status "复制WPS文件 (${WPS_SOURCE_DIR} → ${WPS_WORK_DIR})" || exit 1
-        log_info "WPS源码文件列表:"
-        # 文件列表仅用于诊断；pipefail 下 ls 收到 SIGPIPE 不能影响主流程。
-        ls -lh "${WPS_WORK_DIR}/" | head -15 || true
+        mkdir -p "${WPS_WORK_DIR}/geogrid" "${WPS_WORK_DIR}/ungrib" "${WPS_WORK_DIR}/metgrid"
+        cp -a "${WPS_SOURCE_DIR}/geogrid/GEOGRID.TBL"* "${WPS_WORK_DIR}/geogrid/"
+        cp -a "${WPS_SOURCE_DIR}/metgrid/METGRID.TBL"* "${WPS_WORK_DIR}/metgrid/"
+        cp -a "${WPS_SOURCE_DIR}/ungrib/Variable_Tables" "${WPS_WORK_DIR}/ungrib/"
+        ln -sfn "${WPS_SOURCE_DIR}/geogrid.exe" "${WPS_WORK_DIR}/geogrid.exe"
+        ln -sfn "${WPS_SOURCE_DIR}/ungrib.exe" "${WPS_WORK_DIR}/ungrib.exe"
+        ln -sfn "${WPS_SOURCE_DIR}/metgrid.exe" "${WPS_WORK_DIR}/metgrid.exe"
+        ln -sfn "${WPS_SOURCE_DIR}/link_grib.csh" "${WPS_WORK_DIR}/link_grib.csh"
+        check_status "准备最小 WPS 运行文件 (${WPS_SOURCE_DIR} → ${WPS_WORK_DIR})" || exit 1
     else
         log_error "WPS源码目录不存在: ${WPS_SOURCE_DIR}"
         log_error "请检查 ${MODEL_DIR}/ 下是否有 WPSV4.2 文件夹"
@@ -941,10 +974,16 @@ step2_environment_setup() {
         ln -sf "${WRF_INSTALL_DIR}/bin/real" "${WRF_WORK_DIR}/run/real.exe"
         ln -sf "${WRF_INSTALL_DIR}/bin/wrf" "${WRF_WORK_DIR}/run/wrf.exe"
     elif [ -d "${WRF_SOURCE_DIR}" ]; then
-        cp -r ${WRF_SOURCE_DIR}/* ${WRF_WORK_DIR}/
-        check_status "复制WRF文件 (${WRF_SOURCE_DIR} → ${WRF_WORK_DIR})" || exit 1
-        log_info "WRF源码文件列表:"
-        ls -lh "${WRF_WORK_DIR}/" | head -15 || true
+        tar -C "${WRF_SOURCE_DIR}/run" \
+            --exclude='./real.exe' --exclude='./wrf.exe' \
+            --exclude='./wrfout_d*' --exclude='./wrfrst_d*' \
+            --exclude='./wrfinput_d*' --exclude='./wrfbdy_d*' --exclude='./wrffdda_d*' \
+            --exclude='./met_em.d*' --exclude='./rsl.out.*' --exclude='./rsl.error.*' \
+            --exclude='./*.log' --exclude='./namelist.input' \
+            -cf - . | tar -C "${WRF_WORK_DIR}/run" -xf -
+        ln -sfn "${WRF_SOURCE_DIR}/main/real.exe" "${WRF_WORK_DIR}/run/real.exe"
+        ln -sfn "${WRF_SOURCE_DIR}/main/wrf.exe" "${WRF_WORK_DIR}/run/wrf.exe"
+        check_status "准备最小 WRF 运行文件 (${WRF_SOURCE_DIR}/run → ${WRF_WORK_DIR}/run)" || exit 1
     else
         log_error "WRF源码目录不存在: ${WRF_SOURCE_DIR}"
         log_error "请检查 ${MODEL_DIR}/ 下是否有 WRFV4.5.2 文件夹"
@@ -1361,6 +1400,12 @@ step4_wrf_running() {
     load_runtime_environment
 
     cd ${WRF_WORK_DIR}/run
+    local runtime_free_gb
+    runtime_free_gb=$(df -Pk . 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
+    if ! [[ "$runtime_free_gb" =~ ^[0-9]+$ ]] || [ "$runtime_free_gb" -lt "${WRF_RUNTIME_PRE_WRF_MIN_FREE_GB:-40}" ]; then
+        log_error "进入 real/wrf 前 NVMe 可用空间不足: ${runtime_free_gb:-unknown}GB < ${WRF_RUNTIME_PRE_WRF_MIN_FREE_GB:-40}GB"
+        exit 1
+    fi
     log_info "当前工作目录: $(pwd)"
 
     local max_dom=${WRF_MAX_DOM:-1}
@@ -1448,6 +1493,12 @@ step4_wrf_running() {
     DX_OUTER_KM=$(( ${WRF_DX} / 1000 ))
     TIME_STEP=$((5 * DX_OUTER_KM))
     log_info "外层分辨率: ${WRF_DX}m, time_step: ${TIME_STEP}s (5×${DX_OUTER_KM}km)"
+    OUTPUT_INTERVAL_SECONDS=3600
+    if [ $((OUTPUT_INTERVAL_SECONDS % TIME_STEP)) -eq 0 ]; then
+        log_info "输出时次检查: ${OUTPUT_INTERVAL_SECONDS}s 可被 time_step=${TIME_STEP}s 整除"
+    else
+        log_warn "输出时次检查: ${OUTPUT_INTERVAL_SECONDS}s 不能被 time_step=${TIME_STEP}s 整除；将启用 adjust_output_times 对齐计划时次"
+    fi
 
     # 4.4 创建namelist.input配置文件
     log_info "创建namelist.input配置文件..."
@@ -1525,6 +1576,7 @@ step4_wrf_running() {
  history_interval                    = ${WRF_HISTORY},
  history_begin                       = ${WRF_HISTORY_BEGIN},
  frames_per_outfile                  = $(csv_repeat "1"),
+ adjust_output_times                 = .true.,
  restart                             = .false.,
  restart_interval                    = 7200,
  io_form_history                     = 2,
@@ -1624,11 +1676,19 @@ WRF_EOF
     log_info "namelist.input创建完成"
     rm -f real.log wrf.log rsl.out.* rsl.error.* wrfinput_d0* wrfbdy_d01 wrffdda_d0*
 
+    local requested_mpi_processes="${WRF_MPI_PROCESSES:-4}"
+    local mpi_processes
+    mpi_processes=$(select_safe_mpi_processes "$requested_mpi_processes")
+    log_info "使用MPI并行，进程数: ${mpi_processes}"
+
     # 4.5 运行real.exe
     log_info "运行real.exe (生成初始和边界条件)..."
     if [ -f "./real.exe" ]; then
         local real_status=0
-        if ./real.exe 2>&1 | tee real.log; then
+        # NVHPC 自带的 OpenMPI 是可搬迁安装。直接执行 MPI 版 real.exe 会
+        # 进入 singleton 初始化并回查编译机上的 /proj/nv/... 原始前缀；
+        # 始终通过 mpirun 启动，确保 orted 和运行前缀由当前环境解析。
+        if mpirun -np "$mpi_processes" ./real.exe 2>&1 | tee real.log; then
             real_status=0
         else
             real_status=${PIPESTATUS[0]}
@@ -1683,16 +1743,31 @@ WRF_EOF
 
     # 4.6 运行wrf.exe
     log_info "运行wrf.exe (开始数值模拟)..."
-    local requested_mpi_processes="${WRF_MPI_PROCESSES:-4}"
-    local mpi_processes
-    mpi_processes=$(select_safe_mpi_processes "$requested_mpi_processes")
-    log_info "使用MPI并行，进程数: ${mpi_processes}"
     if [ -f "./wrf.exe" ]; then
         # WRF 的逐步 Timing 与错误信息主要写入 rsl.error.0000，而非 stdout。
         # 使用有限的增量轮询转发日志。不要使用永久 tail -F 管道：杀掉外层
         # 子 shell 后，tail/sed 仍可能持有 Web 服务的 stdout，导致模型已经完成
         # 但后端永远等不到 EOF，无法进入 wrfout 归档和可视化阶段。
-        mpirun -np "${mpi_processes}" ./wrf.exe > wrf.log 2>&1 &
+        if [ "${WRF_RUNTIME_PROFILE:-cpu}" = "gpu" ]; then
+            local gpu_devices="${WRF_GPU_DEVICES:-0}"
+            cat > .wrf_gpu_rank.sh <<'GPU_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=',' read -ra devices <<< "${WRF_GPU_DEVICES:-0}"
+rank="${OMPI_COMM_WORLD_LOCAL_RANK:-0}"
+if (( rank >= ${#devices[@]} )); then
+    echo "GPU rank ${rank} 没有对应设备（${WRF_GPU_DEVICES:-0}）" >&2
+    exit 91
+fi
+export CUDA_VISIBLE_DEVICES="${devices[$rank]}"
+exec ./wrf.exe
+GPU_WRAPPER
+            chmod 700 .wrf_gpu_rank.sh
+            log_info "GPU OpenACC 模式: MPI=${mpi_processes}, devices=${gpu_devices}"
+            WRF_GPU_DEVICES="$gpu_devices" mpirun -np "${mpi_processes}" ./.wrf_gpu_rank.sh > wrf.log 2>&1 &
+        else
+            mpirun -np "${mpi_processes}" ./wrf.exe > wrf.log 2>&1 &
+        fi
         local wrf_pid=$!
         (
             local emitted_lines=0

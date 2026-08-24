@@ -14,6 +14,7 @@ from gfs import GfsManager
 from hpc import HpcClient, HpcError
 from recommendations import RecommendationManager
 from schemas import (
+    FIXED_SPINUP_HOURS,
     HpcAuthRequest,
     RemoteGfsCleanupRequest,
     RemoteGfsTriggerRequest,
@@ -46,7 +47,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Weather WRF Backend",
-    description="超算共享 GFS 数据池调度、WPS/WRF 执行与 WebP 结果发布微服务。",
+    description="tx-lab 共享 GFS 数据池调度、WPS/WRF 执行与 WebP 结果发布微服务。",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -108,20 +109,29 @@ def root() -> dict[str, Any]:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     hpc_health = task_manager.hpc_health
+    if hpc_health.get("status") != "ready":
+        hpc_health = task_manager.refresh_hpc_health()
     hpc_health["transfer"] = hpc_client.transfer_status
-    hpc_health["server_index"] = settings.hpc_server_index
-    hpc_health["account_index"] = settings.hpc_account_index
+    hpc_health["ssh_port"] = settings.hpc_port
     return ok(
         {
             "status": "online",
-            "mode": "parallel_hpc_task_service",
+            "mode": "tx_lab_remote_task_service",
             "queue_size": task_manager.queue_size,
             "active_task_id": task_manager.active_task_id,
             "active_task_ids": task_manager.active_task_ids,
             "active_task_count": task_manager.active_task_count,
-            "max_concurrent_tasks": settings.max_concurrent_tasks,
+            "scheduling_mode": "dynamic",
             "hpc": hpc_health,
-            "gfs": {"mode": "hpc_remote_pool"},
+            "gfs": {
+                "mode": "tx_lab_remote_pool",
+                "scope": "regional_subset",
+                "bounds": hpc_client.gfs_bounds,
+                "remote_root": settings.hpc_gfs_dir,
+                "storage_mount": settings.hpc_gfs_mount,
+                "min_free_gb": settings.hpc_gfs_min_free_gb,
+                "prefetch": task_manager.gfs_prefetch_status,
+            },
         }
     )
 
@@ -132,25 +142,31 @@ def options() -> dict[str, Any]:
         {
             "capabilities": {
                 "data_sources": ["GFS"],
-                "execution_modes": ["HPC"],
+                "execution_modes": ["TX_LAB"],
                 "max_domains": 4,
-                "max_concurrent_tasks": settings.max_concurrent_tasks,
+                "scheduling_mode": "dynamic",
+                "runtime_profiles": ["cpu"],
+                "default_runtime_profile": "cpu",
+                "fixed_spinup_hours": FIXED_SPINUP_HOURS,
                 "gfs_cycle_hours": [0],
                 "gfs_cycle_policy": "latest_covering_00z",
-                "gfs_product": "gfs-0p25-full",
-                "gfs_download_mode": "hpc_remote_full_file",
+                "gfs_product": "gfs-0p25-china",
+                "gfs_scope": "regional_subset",
+                "gfs_bounds": hpc_client.gfs_bounds,
+                "gfs_download_mode": "hpc_remote_nomads_grib_filter",
+                "gfs_storage_path": settings.hpc_gfs_dir,
+                "gfs_storage_mount": settings.hpc_gfs_mount,
+                "gfs_min_free_gb": settings.hpc_gfs_min_free_gb,
+                "gfs_request_interval_seconds": settings.hpc_gfs_request_interval_seconds,
+                "gfs_prefetch_enabled": settings.hpc_gfs_prefetch_enabled,
+                "gfs_prefetch_interval_seconds": settings.hpc_gfs_prefetch_interval_seconds,
+                "gfs_retained_cycles": settings.hpc_gfs_retained_cycles,
+                "gfs_min_speed_bps": settings.hpc_gfs_min_speed_bps,
+                "gfs_slow_seconds": settings.hpc_gfs_slow_seconds,
                 "hpc_transfer_mode": settings.hpc_transfer_mode,
                 "hpc_import_legacy_gfs": settings.hpc_import_legacy_gfs,
             },
-            "forecast_intervals": [1, 3, 6, 12, 24],
-            "forecast_focuses": [
-                {"value": "general", "label": "通用预报"},
-                {"value": "convection", "label": "强对流 / 降水"},
-                {"value": "temperature_wind", "label": "温度 / 风场"},
-                {"value": "urban", "label": "城市精细预报"},
-                {"value": "snowfall", "label": "降雪过程"},
-            ],
-            "spinup_hours": [0, 3, 6, 12, 18, 24],
+            "forecast_intervals": [1, 3, 6],
             "assimilation_schemes": [
                 {"value": "off", "label": "关闭"},
                 {"value": "fdda_weak", "label": "弱网格松弛"},
@@ -176,31 +192,39 @@ def options() -> dict[str, Any]:
 def data_status() -> dict[str, Any]:
     try:
         target_cycles = gfs_manager.latest_cycles()
-        pool_items = hpc_client.gfs_pool_items(target_cycles, task_manager.active_gfs_cycles())
+        active_cycles = task_manager.active_gfs_cycles()
+        retained_cycles = task_manager.retained_gfs_cycles()
+        pool_items = hpc_client.gfs_pool_items(
+            target_cycles,
+            active_cycles | retained_cycles,
+        )
+        for item in pool_items:
+            for cycle in item.get("cycles") or []:
+                key = str(cycle.get("cycle") or "")
+                cycle["task_required"] = key in active_cycles
+                cycle["retained"] = key in retained_cycles
+                cycle["prefetch_target"] = key in target_cycles
         return ok({
             "status": pool_items[0].get("status", "idle"),
-            "mode": "hpc_remote_pool",
+            "mode": "tx_lab_remote_pool",
+            "scope": "regional_subset",
+            "bounds": hpc_client.gfs_bounds,
+            "storage_path": settings.hpc_gfs_dir,
             "target_cycles": target_cycles,
             "pool_items": pool_items,
         })
     except Exception as exc:
-        return ok({"status": "unavailable", "mode": "hpc_remote_pool", "message": str(exc), "pool_items": []})
+        return ok({"status": "unavailable", "mode": "tx_lab_remote_pool", "message": str(exc), "pool_items": []})
 
 
 @app.post("/api/wrf/gfs/sync-latest", status_code=202)
 def sync_latest_remote_gfs() -> dict[str, Any]:
-    target_cycles = gfs_manager.latest_cycles()
     try:
-        pool = hpc_client.gfs_pool_items(target_cycles, task_manager.active_gfs_cycles())[0]
-        by_cycle = {item["cycle"]: item for item in pool.get("cycles") or []}
-        actions = []
-        for cycle in reversed(target_cycles):
-            item = by_cycle.get(cycle) or {}
-            if item.get("complete"):
-                actions.append({"cycle": cycle, "status": "ready", "detail": "73/73"})
-            else:
-                actions.append(hpc_client.trigger_gfs_download(cycle, 72))
-        return ok({"target_cycles": target_cycles, "actions": actions}, message="超算最近两个 00Z 周期同步状态已检查")
+        result = task_manager.sync_latest_gfs()
+        return ok(
+            result,
+            message=f"tx-lab 最近 {settings.hpc_gfs_retained_cycles} 个中国区域 00Z 周期已同步",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HpcError as exc:
@@ -214,9 +238,9 @@ def cleanup_remote_gfs(request: RemoteGfsCleanupRequest) -> dict[str, Any]:
         result = hpc_client.cleanup_gfs_cycles(
             request.paths,
             target_cycles,
-            task_manager.active_gfs_cycles(),
+            task_manager.protected_gfs_cycles(),
         )
-        return ok(result, message="已清理确认的超算旧 GFS 周期")
+        return ok(result, message="已清理确认的 tx-lab 旧 GFS 周期")
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HpcError as exc:
@@ -226,7 +250,11 @@ def cleanup_remote_gfs(request: RemoteGfsCleanupRequest) -> dict[str, Any]:
 @app.post("/api/wrf/gfs/trigger", status_code=202)
 def trigger_remote_gfs(request: RemoteGfsTriggerRequest) -> dict[str, Any]:
     try:
-        return ok(hpc_client.trigger_gfs_download(request.cycle, 72), message="超算共享 GFS 下载状态已检查")
+        protected_cycles = task_manager.protected_gfs_cycles()
+        auto_cleanup = hpc_client.auto_cleanup_gfs_cycles([request.cycle], protected_cycles)
+        result = hpc_client.trigger_gfs_download(request.cycle, 72)
+        result["auto_cleanup"] = auto_cleanup
+        return ok(result, message="tx-lab 共享 GFS 已自动清理并检查下载状态")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HpcError as exc:
@@ -237,7 +265,7 @@ def trigger_remote_gfs(request: RemoteGfsTriggerRequest) -> dict[str, Any]:
 def create_recommendation(request: WrfRecommendationRequest) -> dict[str, Any]:
     return ok(
         recommendation_manager.submit(request.model_dump(mode="json")),
-        message="已提交超算 geogrid 地理分析",
+        message="已提交 tx-lab geogrid 地理分析",
     )
 
 
@@ -255,14 +283,19 @@ def create_task(payload: WrfTaskCreate, request: Request) -> dict[str, Any]:
     if hpc.get("status") != "ready":
         hpc = task_manager.refresh_hpc_health()
     if hpc.get("status") != "ready":
-        raise HTTPException(status_code=503, detail=f"超算环境未就绪：{hpc.get('message') or hpc.get('status')}")
+        raise HTTPException(status_code=503, detail=f"tx-lab 环境未就绪：{hpc.get('message') or hpc.get('status')}")
     owner_sub, _ = _viewer(request)
     task = task_manager.submit(payload.model_dump(mode="json"), owner_sub)
-    return ok(task, message="WRF 任务已进入并行队列")
+    return ok(task, message="WRF 任务已开始动态并行调度")
 
 
 @app.post("/api/wrf/hpc/auth")
 def authenticate_hpc(request: HpcAuthRequest) -> dict[str, Any]:
+    if settings.hpc_connection_mode == "direct" and settings.hpc_auth_mode == "key":
+        raise HTTPException(
+            status_code=400,
+            detail="tx-lab 工作台使用专用 SSH 密钥；密码只允许人工 SSH 登录，不由服务接收",
+        )
     result = task_manager.authenticate_hpc(request.password.get_secret_value())
     if result.get("status") == "auth_required":
         stage = str(result.get("stage") or "密码认证")
@@ -274,8 +307,8 @@ def authenticate_hpc(request: HpcAuthRequest) -> dict[str, Any]:
         # 返回 400，避免前端通用 401 处理错误地注销平台登录态。
         raise HTTPException(status_code=400, detail=detail)
     if result.get("status") != "ready":
-        raise HTTPException(status_code=503, detail=f"超算连接或运行环境未就绪：{result.get('message') or result.get('status')}")
-    return ok(result, message="超算认证成功")
+        raise HTTPException(status_code=503, detail=f"tx-lab 连接或运行环境未就绪：{result.get('message') or result.get('status')}")
+    return ok(result, message="tx-lab 认证成功")
 
 
 @app.get("/api/wrf/tasks")
@@ -378,7 +411,7 @@ def restart_task(task_id: str, payload: WrfTaskRestartRequest, request: Request)
 def resume_task(task_id: str, request: Request) -> dict[str, Any]:
     try:
         get_visible_task(task_id, request)
-        return ok(task_manager.resume_external(task_id), message="已从原任务阶段开始超算对账")
+        return ok(task_manager.resume_external(task_id), message="已从原任务阶段开始 tx-lab 对账")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
     except TaskConflictError as exc:
@@ -391,11 +424,11 @@ def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
     if hpc.get("status") != "ready":
         raise HTTPException(
             status_code=503,
-            detail=f"超算环境未就绪：{hpc.get('message') or hpc.get('status')}，请先完成超算认证",
+            detail=f"tx-lab 环境未就绪：{hpc.get('message') or hpc.get('status')}，请先检查服务器连接",
         )
     try:
         get_visible_task(task_id, request)
-        return ok(task_manager.retry_outputs(task_id), message="已加入结果下载恢复队列")
+        return ok(task_manager.retry_outputs(task_id), message="已开始结果下载恢复动态调度")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
     except TaskConflictError as exc:
@@ -406,7 +439,7 @@ def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
 def render_partial_outputs(task_id: str, request: Request) -> dict[str, Any]:
     try:
         get_visible_task(task_id, request)
-        return ok(task_manager.render_partial(task_id), message="已确认忽略坏帧并加入部分渲染队列")
+        return ok(task_manager.render_partial(task_id), message="已确认忽略不可读帧并开始部分渲染动态调度")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
     except TaskConflictError as exc:

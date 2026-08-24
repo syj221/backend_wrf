@@ -18,16 +18,26 @@ class GfsManager:
     def cycle_key(value: datetime) -> str:
         return value.astimezone(timezone.utc).strftime("%Y%m%d%H")
 
-    def latest_cycles(self, now: datetime | None = None, count: int = 2) -> list[str]:
+    def latest_cycles(self, now: datetime | None = None, count: int = 1) -> list[str]:
         cursor = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        cursor -= timedelta(hours=self.settings.hpc_gfs_publication_lag_hours)
         cursor = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
         return [self.cycle_key(cursor - timedelta(days=index)) for index in range(max(1, count))]
 
-    def select_cycle(self, start: datetime, end: datetime) -> tuple[str, list[int]]:
-        """按模型起报日固定选择 00Z；数据可用性由超算数据池负责检查。"""
+    def select_cycle(
+        self,
+        start: datetime,
+        end: datetime,
+        now: datetime | None = None,
+    ) -> tuple[str, list[int]]:
+        """选择已过发布缓冲且能够覆盖模拟窗口的最近 00Z。"""
         start = start.astimezone(timezone.utc)
         end = end.astimezone(timezone.utc)
-        candidate = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        requested_cycle = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        available_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        available_at -= timedelta(hours=self.settings.hpc_gfs_publication_lag_hours)
+        latest_available_cycle = available_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        candidate = min(requested_cycle, latest_available_cycle)
         end_offset = int((end - candidate).total_seconds() // 3600) + 6
         start_offset = int((start - candidate).total_seconds() // 3600)
         if start_offset < 0 or end_offset > GFS_MAX_FORECAST_HOUR:

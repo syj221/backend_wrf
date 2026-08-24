@@ -13,6 +13,7 @@ from typing import Any
 from datetime import datetime, timedelta
 
 from config import Settings
+from schemas import FIXED_RUNTIME_PROFILE, FIXED_SPINUP_HOURS, normalize_task_request
 
 
 SAFE_TASK_ID = re.compile(r"^wrf_(?:gfs_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
@@ -470,6 +471,7 @@ from hpc_transport import HpcAuthError, HpcClient, HpcError  # noqa: E402,F401
 
 
 def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: list[int]) -> dict[str, Any]:
+    request = normalize_task_request(request)
     start = request["start_time"]
     end = request["end_time"]
     if isinstance(start, str):
@@ -478,18 +480,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
     if isinstance(end, str):
         end = end.replace("Z", "+00:00")
         end = datetime.fromisoformat(end)
-    spinup = request.get("spinup") or {"mode": "off", "hours": 0}
-    if spinup.get("mode") == "custom":
-        spinup_hours = int(spinup.get("hours") or 0)
-    elif spinup.get("mode") == "auto":
-        focus = request.get("forecast_focus", "general")
-        finest_dx = min(int(item.get("dx") or 999999) for item in request.get("domains") or [{}])
-        base = 12 if focus in {"convection", "urban", "snowfall"} or finest_dx <= 3000 else 6
-        interval = int(request.get("forecast_interval_hours") or 1)
-        spinup_hours = next((value for value in (6, 12, 18, 24) if value >= base and value % interval == 0), 24)
-    else:
-        spinup_hours = 0
-    model_start = start - timedelta(hours=spinup_hours)
+    model_start = start - timedelta(hours=FIXED_SPINUP_HOURS)
     assimilation = {
         "off": {"grid_fdda": 0, "guv": 0.0, "gt": 0.0, "gq": 0.0},
         "fdda_weak": {"grid_fdda": 1, "guv": 0.0001, "gt": 0.0001, "gq": 0.0},
@@ -501,12 +492,13 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
         "task_id": task_id,
         "display_id": task_id,
         "data_source": "gfs",
+        "runtime_profile": FIXED_RUNTIME_PROFILE,
         "time_range": {
             "start_year": model_start.year, "start_month": model_start.month, "start_day": model_start.day, "start_hour": model_start.hour,
             "end_year": end.year, "end_month": end.month, "end_day": end.day, "end_hour": end.hour,
             "product_start": start.isoformat(),
             "model_start": model_start.isoformat(),
-            "spinup_hours": spinup_hours,
+            "spinup_hours": FIXED_SPINUP_HOURS,
         },
         "center": request["center"],
         "max_dom": len(request["domains"]),
@@ -515,7 +507,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
         "assimilation": {
             "scheme": scheme,
             "params": assimilation[scheme],
-            "end_hour": spinup_hours,
+            "end_hour": FIXED_SPINUP_HOURS,
             "coarse_min_dx": 9000,
             "ramp_minutes": 60,
         },
@@ -525,7 +517,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
             "gfs_cycle_hour": cycle[8:10],
             "gfs_forecast_hours": hours,
             "gfs_required_forecast_hours": hours,
-            "gfs_file_interval_hours": request["forecast_interval_hours"],
+            "gfs_file_interval_hours": int(request.get("forecast_interval_hours") or 1),
         },
         "output": {"task_tag": task_id},
     }
@@ -546,6 +538,7 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
     assimilation = config["assimilation"]
     environment: dict[str, Any] = {
         "WRF_TASK_TAG": config["output"]["task_tag"],
+        "WRF_REQUESTED_RUNTIME_PROFILE": config.get("runtime_profile", "cpu"),
         "WRF_DATA_SOURCE": "gfs",
         "WRF_NONINTERACTIVE": "true",
         "WRF_MAX_DOM": config["max_dom"],

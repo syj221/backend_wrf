@@ -12,9 +12,10 @@ from typing import Any
 
 from config import Settings
 from hpc import HpcClient
+from schemas import FIXED_SPINUP_HOURS
 
 
-RECOMMENDATION_VERSION = "2026.07-geography-season-v2"
+RECOMMENDATION_VERSION = "2026.08-geography-season-v3"
 
 
 def _utc_now() -> str:
@@ -88,7 +89,6 @@ class RecommendationManager:
 
     @staticmethod
     def _recommend(request: dict[str, Any], geography: dict[str, Any]) -> dict[str, Any]:
-        focus = request.get("forecast_focus", "general")
         domains = request["domains"]
         geo_by_domain = {item["domain"]: item for item in geography.get("domains") or []}
         signed_latitude = float(request["center"]["lat"])
@@ -114,18 +114,16 @@ class RecommendationManager:
         coastal_trigger = any(
             0.15 <= float(item.get("water_fraction", 0)) <= 0.85 for item in geo_domains
         )
-        if focus == "snowfall" or (cold_season and latitude >= 35):
+        if cold_season and latitude >= 35:
             preset = "冷季降雪 / 混合相态"
             mp_physics = 16
-        elif focus == "convection" and (season != "冷季" or tropical):
+        elif tropical:
             preset = "暖季强对流 / 降水"
             mp_physics = 6
         else:
-            preset = "城市精细预报" if focus == "urban" else ("温度 / 风场" if focus == "temperature_wind" else "地理季节综合推荐")
+            preset = "地理季节综合推荐"
             mp_physics = 8
-        if focus == "temperature_wind":
-            bl_pbl_physics, sf_sfclay_physics = 5, 5
-        elif terrain_trigger or focus == "snowfall":
+        if terrain_trigger or mp_physics == 16:
             bl_pbl_physics, sf_sfclay_physics = 2, 2
         else:
             bl_pbl_physics, sf_sfclay_physics = 1, 1
@@ -134,15 +132,13 @@ class RecommendationManager:
         for domain in domains:
             dx = int(domain["dx"])
             if dx >= 10000:
-                cu.append(16 if focus == "convection" or tropical else 1)
+                cu.append(16 if tropical else 1)
             elif dx > 3000:
                 cu.append(3)
             else:
                 cu.append(0)
             geo = geo_by_domain.get(domain["id"], {})
-            urban.append(1 if focus == "urban" and dx <= 3000 and float(geo.get("urban_fraction", 0)) >= 0.15 else 0)
-        fine_trigger = min(int(item["dx"]) for item in domains) <= 3000
-        spinup_hours = 12 if focus in {"convection", "urban", "snowfall"} or terrain_trigger or fine_trigger else 6
+            urban.append(1 if dx <= 3000 and float(geo.get("urban_fraction", 0)) >= 0.15 else 0)
         radt = max(1, min(15, round(min(int(item["dx"]) for item in domains) / 1000)))
         physics = {
             "preset": preset,
@@ -165,28 +161,20 @@ class RecommendationManager:
             f"geogrid 地形最高约 {max_terrain:.0f} m、起伏 {max_terrain_range:.0f} m、标准差 {max_terrain_std:.0f} m；边界层/近地层采用 {bl_pbl_physics}/{sf_sfclay_physics}。",
             f"区域最大水体比例 {max_water:.0%}、城市比例 {max_urban:.0%}；城市冠层按逐域城市比例和网格距设置。",
             f"积云参数按网格距逐域设置为 {cu}：≥10 km 参数化、3–10 km 尺度感知、≤3 km 显式对流。",
-            f"综合关注点、最细网格、地形和下垫面，建议 {spinup_hours} 小时 spin-up，辐射调用间隔 {radt} 分钟。",
-            "网格松弛只建议用于 spin-up 的 ≥9 km 粗网格，且不松弛水汽和边界层。",
+            f"当前任务固定采用 {FIXED_SPINUP_HOURS} 小时 spin-up；根据最细网格设置辐射调用间隔 {radt} 分钟。",
+            "网格松弛仅作用于固定 spin-up 时段的 ≥9 km 粗网格，且不松弛水汽和边界层。",
         ]
         if terrain_trigger:
-            reasons.append("geogrid 显示复杂地形，延长 spin-up 以减小初始调整噪声。")
+            reasons.append("geogrid 显示复杂地形；当前阶段仍使用统一 6 小时 spin-up，建议结合历史个例评估初始调整噪声。")
         if coastal_trigger:
             reasons.append("嵌套域同时包含显著陆地和水体，方案保留 Noah 陆面过程并强调近地层陆海差异。")
-        if focus == "urban" and not any(urban):
-            reasons.append("当前最内层城市比例不足 15%，未自动开启 UCM。")
         warnings = ["该方案是规则化起点，不代表对个例最优；正式业务应通过历史个例回报检验。"]
-        if focus == "snowfall" and not cold_season and not tropical:
-            warnings.append("所选月份处于当地暖季，请再次确认降雪预报关注点。")
-        if tropical and focus == "snowfall":
-            warnings.append("中心位于热带纬度，降雪方案仅适用于明确的高海拔个例。")
-        assimilation_scheme = "fdda_standard" if int(domains[0]["dx"]) >= 9000 and spinup_hours else "off"
+        assimilation_scheme = "fdda_standard" if int(domains[0]["dx"]) >= 9000 else "off"
         return {
             "fingerprint": _digest({"version": RECOMMENDATION_VERSION, "request": request}),
             "version": RECOMMENDATION_VERSION,
             "generated_at": _utc_now(),
-            "forecast_focus": focus,
             "physics": physics,
-            "spinup": {"mode": "custom", "hours": spinup_hours},
             "assimilation_scheme": assimilation_scheme,
             "geography": geography,
             "factors": {

@@ -124,6 +124,80 @@ def _filename_time(name: str) -> tuple[str, str]:
     return match.group(1).lower(), f"{match.group(2)}T{match.group(3)}Z"
 
 
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _output_time_tolerance_seconds(
+    task_request: dict[str, Any],
+    domains: list[dict[str, Any]],
+) -> int:
+    request_domains = list(task_request.get("domains") or [])
+    dx = (request_domains[0].get("dx") if request_domains else None) or (
+        domains[0].get("dx") if domains else 0
+    )
+    try:
+        # 与 wrf.sh 的固定时间步算法一致：5 × 外层水平分辨率（km）。
+        return max(1, 5 * max(1, int(float(dx) / 1000)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _align_output_times(
+    domains: list[dict[str, Any]],
+    expected_times: list[str],
+    tolerance_seconds: int,
+) -> list[dict[str, Any]]:
+    expected = [(label, _parse_utc(label)) for label in expected_times]
+    expected = [(label, value) for label, value in expected if value is not None]
+    adjustments: list[dict[str, Any]] = []
+    for domain in domains:
+        replacements: dict[str, str] = {}
+        offsets: dict[str, int] = {}
+        claimed: set[str] = set()
+        candidates: list[tuple[int, str, str, int]] = []
+        for source_time in sorted(set(domain.get("times") or [])):
+            source_value = _parse_utc(source_time)
+            if source_value is None or not expected:
+                continue
+            target_time, target_value = min(
+                expected,
+                key=lambda item: abs((source_value - item[1]).total_seconds()),
+            )
+            offset = int((source_value - target_value).total_seconds())
+            candidates.append((abs(offset), source_time, target_time, offset))
+        for absolute_offset, source_time, target_time, offset in sorted(candidates):
+            if absolute_offset > tolerance_seconds or target_time in claimed:
+                continue
+            claimed.add(target_time)
+            replacements[source_time] = target_time
+            offsets[source_time] = offset
+            if source_time != target_time:
+                adjustments.append({
+                    "domain": domain["id"],
+                    "source_time": source_time,
+                    "time": target_time,
+                    "offset_seconds": offset,
+                })
+        domain["times"] = sorted({replacements.get(value, value) for value in domain.get("times") or []})
+        for variable in domain.get("variables") or []:
+            for frame in variable.get("frames") or []:
+                source_time = str(frame.get("time") or "")
+                target_time = replacements.get(source_time, source_time)
+                if target_time != source_time:
+                    frame["source_time"] = source_time
+                    frame["time_offset_seconds"] = offsets[source_time]
+                    frame["time"] = target_time
+            variable["frames"].sort(key=lambda frame: frame["time"])
+    return adjustments
+
+
 def render_run(
     task_id: str,
     raw_dir: Path,
@@ -141,7 +215,7 @@ def render_run(
     invalid = list(excluded_outputs or []) + list(validation["invalid"])
     if invalid and not allow_partial:
         names = ", ".join(item.get("name", "unknown") for item in invalid[:5])
-        raise RuntimeError(f"wrfout 完整性校验失败：{names}；可选择忽略坏帧并部分渲染")
+        raise RuntimeError(f"wrfout 完整性校验失败：{names}；可选择忽略不可读帧并部分渲染")
     sources = validation["valid"]
     if not sources:
         raise RuntimeError("未找到可渲染的 wrfout 文件")
@@ -213,6 +287,8 @@ def render_run(
     while cursor <= end:
         expected_times.append(cursor.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
         cursor += timedelta(hours=1)
+    time_tolerance_seconds = _output_time_tolerance_seconds(task_request, domains)
+    time_adjustments = _align_output_times(domains, expected_times, time_tolerance_seconds)
     missing_by_domain: dict[str, list[str]] = {}
     for domain in domains:
         available = set(domain["times"])
@@ -236,8 +312,14 @@ def render_run(
             }
         )
     partial = bool(excluded or missing_by_domain)
+    warnings = (
+        (["部分 wrfout 无法读取，已从可视化中排除"] if excluded else [])
+        + (["部分产品时次缺失"] if missing_by_domain else [])
+    )
+    if time_adjustments:
+        warnings.append(f"{len(time_adjustments)} 个输出时次已在容差内对齐至计划时次")
     manifest = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "image_format": "webp",
         "business_type": "WRF",
         "task_id": task_id,
@@ -251,10 +333,12 @@ def render_run(
         "domains": domains,
         "quality": {
             "status": "partial" if partial else "complete",
-            "warnings": (["部分 wrfout 无法读取，已从可视化中排除"] if excluded else [])
-            + (["部分产品时次缺失"] if missing_by_domain else []),
+            "warnings": warnings,
             "excluded_frames": excluded,
+            "unreadable_frames": excluded,
             "missing_times": missing_by_domain,
+            "time_tolerance_seconds": time_tolerance_seconds,
+            "time_adjustments": time_adjustments,
         },
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import queue
 import shutil
 import threading
 import time
@@ -17,6 +16,7 @@ from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError, write_task_bundle
 from renderer import render_run
+from schemas import FIXED_RUNTIME_PROFILE, FIXED_SPINUP_HOURS, normalize_task_request
 
 
 FINAL_STATES = {"succeeded", "partial_success", "failed", "cancelled", "waiting_restart"}
@@ -27,17 +27,8 @@ EXTERNAL_ERROR_MARKERS = (
 
 
 def resolve_spinup_hours(request: dict[str, Any]) -> int:
-    spinup = request.get("spinup") or {"mode": "off", "hours": 0}
-    mode = spinup.get("mode", "off")
-    if mode == "off":
-        return 0
-    if mode == "custom":
-        return int(spinup.get("hours") or 0)
-    focus = request.get("forecast_focus", "general")
-    finest_dx = min(int(item.get("dx") or 999999) for item in request.get("domains") or [{}])
-    base = 12 if focus in {"convection", "urban", "snowfall"} or finest_dx <= 3000 else 6
-    interval = int(request.get("forecast_interval_hours") or 1)
-    return next((value for value in (6, 12, 18, 24) if value >= base and value % interval == 0), 24)
+    del request
+    return FIXED_SPINUP_HOURS
 
 
 class TaskNotFoundError(KeyError):
@@ -67,20 +58,34 @@ class WrfTaskManager:
         self.store = store
         self.gfs = gfs
         self.hpc = hpc
-        self._queue: queue.Queue[str | None] = queue.Queue()
         self._stop = threading.Event()
-        self._workers: list[threading.Thread] = []
         self._state_lock = threading.RLock()
+        self._started = False
+        self._task_threads: dict[str, threading.Thread] = {}
+        self._pending_task_ids: set[str] = set()
         self._cancelled: set[str] = set()
         self._cancel_threads: dict[str, threading.Thread] = {}
         self._reconcile_timers: dict[str, threading.Timer] = {}
         self._active_task_ids: set[str] = set()
         self._cycle_locks: dict[str, threading.Lock] = {}
-        self._health: dict[str, Any] = {"status": "checking", "message": "等待检查超算连接"}
+        self._gfs_sync_lock = threading.Lock()
+        self._gfs_prefetch_thread: threading.Thread | None = None
+        self._gfs_prefetch: dict[str, Any] = {
+            "enabled": bool(settings.hpc_gfs_prefetch_enabled and gfs is not None),
+            "status": "idle" if settings.hpc_gfs_prefetch_enabled else "disabled",
+            "message": "等待后台检查最新 GFS 00Z"
+            if settings.hpc_gfs_prefetch_enabled
+            else "GFS 后台预取已关闭",
+            "interval_seconds": settings.hpc_gfs_prefetch_interval_seconds,
+            "updated_at": None,
+            "target_cycles": [],
+        }
+        self._health: dict[str, Any] = {"status": "checking", "message": "等待检查 tx-lab 连接"}
 
     @property
     def queue_size(self) -> int:
-        return self._queue.qsize()
+        with self._state_lock:
+            return len(self._pending_task_ids)
 
     @property
     def active_task_id(self) -> str | None:
@@ -100,6 +105,18 @@ class WrfTaskManager:
     @property
     def hpc_health(self) -> dict[str, Any]:
         return dict(self._health)
+
+    @property
+    def gfs_prefetch_status(self) -> dict[str, Any]:
+        with self._state_lock:
+            return dict(self._gfs_prefetch)
+
+    def _set_gfs_prefetch_status(self, **values: Any) -> None:
+        with self._state_lock:
+            self._gfs_prefetch.update(values)
+            self._gfs_prefetch["updated_at"] = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
 
     def refresh_hpc_health(self) -> dict[str, Any]:
         self._check_health()
@@ -124,10 +141,110 @@ class WrfTaskManager:
             except (TaskConflictError, TaskNotFoundError):
                 continue
 
-    def start(self) -> None:
-        if any(worker.is_alive() for worker in self._workers):
+    def sync_latest_gfs(
+        self,
+        *,
+        cleanup_old_cycles: bool = True,
+        target_cycles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """串行检查并触发最近 00Z；实际下载由 tx-lab 的 nohup 进程持有。"""
+        if self.gfs is None:
+            raise RuntimeError("GFS 周期管理器未配置")
+        with self._gfs_sync_lock:
+            selected_cycles = list(target_cycles or self.gfs.latest_cycles())
+            protected_cycles = self.protected_gfs_cycles()
+            auto_cleanup = {"requested": [], "deleted": [], "missing": []}
+            if cleanup_old_cycles:
+                auto_cleanup = self.hpc.auto_cleanup_gfs_cycles(
+                    selected_cycles,
+                    protected_cycles,
+                )
+            pool = self.hpc.gfs_pool_items(selected_cycles, protected_cycles)[0]
+            by_cycle = {item["cycle"]: item for item in pool.get("cycles") or []}
+            actions: list[dict[str, Any]] = []
+            for cycle in reversed(selected_cycles):
+                item = by_cycle.get(cycle) or {}
+                if item.get("complete"):
+                    actions.append({"cycle": cycle, "status": "ready", "detail": "73/73"})
+                else:
+                    actions.append(self.hpc.trigger_gfs_download(cycle, 72))
+            return {
+                "target_cycles": selected_cycles,
+                "actions": actions,
+                "auto_cleanup": auto_cleanup,
+            }
+
+    def _prefetch_latest_gfs_once(self) -> None:
+        if not self._gfs_prefetch.get("enabled"):
             return
-        self._stop.clear()
+        if self.hpc_health.get("status") != "ready":
+            storage_blocked = self.hpc_health.get("status") == "storage_unavailable"
+            self._set_gfs_prefetch_status(
+                status="blocked_storage" if storage_blocked else "waiting_connection",
+                message=(
+                    "tx-lab GFS 存储不可用，已停止后台下载重试"
+                    if storage_blocked
+                    else "等待 tx-lab 连接恢复后继续后台预取"
+                ),
+            )
+            return
+        demand = self.pending_gfs_demand()
+        if demand["task_count"]:
+            cycles = "、".join(demand["cycles"]) or "周期选择中"
+            self._set_gfs_prefetch_status(
+                status="paused_for_task",
+                message=f"后台预取已让路：{demand['task_count']} 个任务需要 {cycles}",
+                task_demand=demand,
+            )
+            return
+        self._set_gfs_prefetch_status(status="checking", message="正在检查最新 GFS 00Z")
+        try:
+            # 只在新的受管中国区域池中保留配置数量的周期；活动任务周期始终受保护。
+            result = self.sync_latest_gfs(
+                cleanup_old_cycles=True,
+                target_cycles=self.gfs.latest_cycles(
+                    count=self.settings.hpc_gfs_retained_cycles,
+                ),
+            )
+        except Exception as exc:
+            self._set_gfs_prefetch_status(status="error", message=str(exc))
+            return
+        actions = result.get("actions") or []
+        statuses = {str(item.get("status") or "") for item in actions}
+        if actions and statuses == {"ready"}:
+            status = "ready"
+            message = "最新 GFS 00Z 已就绪"
+        elif statuses & {"started", "running"}:
+            status = "downloading"
+            message = "tx-lab 正在后台下载 GFS；完成后会继续检查新周期"
+        elif statuses & {"failed", "error"}:
+            status = "error"
+            message = "GFS 后台下载启动失败，将自动重试"
+        else:
+            status = "checked"
+            message = "已完成 GFS 后台检查"
+        self._set_gfs_prefetch_status(
+            status=status,
+            message=message,
+            target_cycles=result.get("target_cycles") or [],
+            actions=actions,
+            auto_cleanup=result.get("auto_cleanup") or {},
+        )
+
+    def _gfs_prefetch_loop(self) -> None:
+        if self._stop.wait(self.settings.hpc_gfs_prefetch_start_delay_seconds):
+            return
+        while not self._stop.is_set():
+            self._prefetch_latest_gfs_once()
+            if self._stop.wait(self.settings.hpc_gfs_prefetch_interval_seconds):
+                return
+
+    def start(self) -> None:
+        with self._state_lock:
+            if self._started:
+                return
+            self._started = True
+            self._stop.clear()
         threading.Thread(target=self._check_health, daemon=True, name="wrf-hpc-health").start()
         pending_cancellations: list[dict[str, Any]] = []
         for task in self.store.active():
@@ -138,17 +255,16 @@ class WrfTaskManager:
                 continue
             if task["status"] != "queued":
                 self.store.update(task["id"], status="reconciling", stage="reconciling")
-            self._queue.put(task["id"])
-        self._workers = [
-            threading.Thread(
-                target=self._work,
+            self._dispatch(task["id"])
+        if self._gfs_prefetch.get("enabled") and not (
+            self._gfs_prefetch_thread and self._gfs_prefetch_thread.is_alive()
+        ):
+            self._gfs_prefetch_thread = threading.Thread(
+                target=self._gfs_prefetch_loop,
                 daemon=True,
-                name=f"wrf-task-worker-{index + 1}",
+                name="wrf-gfs-prefetch",
             )
-            for index in range(self.settings.max_concurrent_tasks)
-        ]
-        for worker in self._workers:
-            worker.start()
+            self._gfs_prefetch_thread.start()
         for task in pending_cancellations:
             if (task.get("runtime") or {}).get("remote_pid"):
                 self._start_remote_cancel(task["id"])
@@ -163,24 +279,56 @@ class WrfTaskManager:
 
     def stop(self) -> None:
         self._stop.set()
-        workers = list(self._workers)
-        for _ in workers:
-            self._queue.put(None)
-        deadline = time.monotonic() + 5
-        for worker in workers:
-            worker.join(timeout=max(0, deadline - time.monotonic()))
         with self._state_lock:
+            task_threads = list(self._task_threads.values())
+            prefetch_thread = self._gfs_prefetch_thread
             cancel_threads = list(self._cancel_threads.values())
             reconcile_timers = list(self._reconcile_timers.values())
             self._reconcile_timers.clear()
         for timer in reconcile_timers:
             timer.cancel()
+        deadline = time.monotonic() + 5
+        for thread in task_threads:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        if prefetch_thread:
+            prefetch_thread.join(timeout=max(0, deadline - time.monotonic()))
         for thread in cancel_threads:
             thread.join(timeout=max(0, deadline - time.monotonic()))
-        if not any(worker.is_alive() for worker in workers) and not any(
-            thread.is_alive() for thread in cancel_threads
+        if (
+            not any(thread.is_alive() for thread in task_threads)
+            and not (prefetch_thread and prefetch_thread.is_alive())
+            and not any(thread.is_alive() for thread in cancel_threads)
         ):
             self.hpc.close_session()
+        with self._state_lock:
+            self._started = False
+            self._pending_task_ids.clear()
+            self._task_threads = {
+                task_id: thread
+                for task_id, thread in self._task_threads.items()
+                if thread.is_alive()
+            }
+
+    def _dispatch(self, task_id: str) -> bool:
+        """为任务创建独立执行线程；同一任务仍在执行时幂等返回。"""
+        with self._state_lock:
+            if not self._started:
+                return False
+            existing = self._task_threads.get(task_id)
+            if existing:
+                return False
+            if self._stop.is_set():
+                return False
+            thread = threading.Thread(
+                target=self._run_task,
+                args=(task_id,),
+                daemon=True,
+                name=f"wrf-task-{task_id[-8:]}",
+            )
+            self._task_threads[task_id] = thread
+            self._pending_task_ids.add(task_id)
+        thread.start()
+        return True
 
     @staticmethod
     def new_task_id() -> str:
@@ -188,6 +336,7 @@ class WrfTaskManager:
         return f"wrf_gfs_{stamp}_{uuid.uuid4().hex[:8]}"
 
     def submit(self, request: dict[str, Any], owner_sub: str = "") -> dict[str, Any]:
+        request = normalize_task_request(request)
         task_id = self.new_task_id()
         task_dir = self.settings.run_dir / task_id
         (task_dir / "raw").mkdir(parents=True, exist_ok=False)
@@ -196,9 +345,12 @@ class WrfTaskManager:
         task = self._merge_runtime(
             task_id,
             attempt_started_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            requested_runtime_profile=FIXED_RUNTIME_PROFILE,
+            active_runtime_profile=FIXED_RUNTIME_PROFILE,
+            fallback_used=False,
         )
-        self._queue.put(task_id)
-        self._log(task_id, f"任务已进入并行队列（最多 {self.settings.max_concurrent_tasks} 个任务）")
+        self._dispatch(task_id)
+        self._log(task_id, "任务已提交，开始动态并行调度")
         return task
 
     @staticmethod
@@ -263,6 +415,34 @@ class WrfTaskManager:
             for task in tasks
             if (task.get("runtime") or {}).get("gfs_cycle")
         }
+
+    def retained_gfs_cycles(self) -> set[str]:
+        if self.gfs is None:
+            return set()
+        return set(self.gfs.latest_cycles(count=self.settings.hpc_gfs_retained_cycles))
+
+    def protected_gfs_cycles(self) -> set[str]:
+        return self.active_gfs_cycles() | self.retained_gfs_cycles()
+
+    def pending_gfs_demand(self) -> dict[str, Any]:
+        waiting_stages = {
+            "queued",
+            "selecting_cycle",
+            "checking_hpc_gfs",
+            "waiting_for_hpc_gfs",
+        }
+        tasks = [
+            task
+            for task in self.store.active()
+            if task.get("status") in {"queued", "prefetching"}
+            or task.get("stage") in waiting_stages
+        ]
+        cycles = sorted({
+            str((task.get("runtime") or {}).get("gfs_cycle"))
+            for task in tasks
+            if (task.get("runtime") or {}).get("gfs_cycle")
+        })
+        return {"task_count": len(tasks), "cycles": cycles}
 
     def retry(self, task_id: str) -> dict[str, Any]:
         self.get(task_id)
@@ -339,6 +519,7 @@ class WrfTaskManager:
         confirm_task_id: str,
         confirm_attempt: int,
     ) -> dict[str, Any]:
+        request = normalize_task_request(request)
         task = self.get(task_id)
         if confirm_task_id != task_id or confirm_attempt != int(task.get("attempt_no") or 1):
             raise ValueError("任务或尝试次数确认值已过期，请重新获取清理清单")
@@ -377,7 +558,7 @@ class WrfTaskManager:
         with self._state_lock:
             self._cancelled.discard(task_id)
         restarted = begin_attempt(task_id, request)
-        self._queue.put(task_id)
+        self._dispatch(task_id)
         self._log(task_id, f"已清理任务级残片并开始第 {restarted['attempt_no']} 次尝试；共享 GFS 数据池已保留")
         return self.get(task_id)
 
@@ -405,8 +586,8 @@ class WrfTaskManager:
             failure={**failure, "failure_class": "external", "recoverable": True, "recommended_action": "resume"},
             error=None,
         )
-        self._queue.put(task_id)
-        self._log(task_id, "超算认证成功，自动继续原任务对账" if automatic else "用户请求继续任务，开始与超算对账")
+        self._dispatch(task_id)
+        self._log(task_id, "tx-lab 连接恢复，自动继续原任务对账" if automatic else "用户请求继续任务，开始与 tx-lab 对账")
         return self.get(task_id)
 
     def retry_outputs(self, task_id: str) -> dict[str, Any]:
@@ -427,8 +608,8 @@ class WrfTaskManager:
             runtime=runtime,
             error=None,
         )
-        self._queue.put(task_id)
-        self._log(task_id, "已加入结果恢复队列，仅重试下载和渲染，不重新运行 WPS/WRF")
+        self._dispatch(task_id)
+        self._log(task_id, "已开始结果恢复动态调度，仅重试下载和渲染，不重新运行 WPS/WRF")
         return task
 
     def render_partial(self, task_id: str) -> dict[str, Any]:
@@ -444,7 +625,7 @@ class WrfTaskManager:
             for marker in ("netcdf", "hdf", "wrfout", "unknown file format")
         )
         if not known_invalid and not legacy_render_error:
-            raise TaskConflictError("任务没有已确认的坏帧，不能切换为部分渲染")
+            raise TaskConflictError("任务没有已确认的不可读帧，不能切换为部分渲染")
         runtime.update(retry_outputs_only=True, allow_partial_outputs=True)
         with self._state_lock:
             self._cancelled.discard(task_id)
@@ -456,8 +637,8 @@ class WrfTaskManager:
             runtime=runtime,
             error=None,
         )
-        self._queue.put(task_id)
-        self._log(task_id, "用户确认忽略坏帧，已加入部分结果渲染队列")
+        self._dispatch(task_id)
+        self._log(task_id, "用户确认忽略不可读帧，已开始部分结果渲染动态调度")
         return task
 
     @staticmethod
@@ -586,7 +767,7 @@ class WrfTaskManager:
                 return
             task = self.store.get(task_id)
             if task and task.get("status") == "reconciling":
-                self._queue.put(task_id)
+                self._dispatch(task_id)
 
         with self._state_lock:
             previous = self._reconcile_timers.pop(task_id, None)
@@ -736,7 +917,7 @@ class WrfTaskManager:
         self._start_remote_cancel(task_id)
         return self.get(task_id)
 
-    def _complete_worker_cancellation(self, task_id: str) -> None:
+    def _complete_task_cancellation(self, task_id: str) -> None:
         task = self.get(task_id)
         if task["status"] in FINAL_STATES:
             return
@@ -748,46 +929,46 @@ class WrfTaskManager:
         self.store.update(task_id, status="cancelled", stage="cancelled", error=None)
         self._log(task_id, "任务已在远端进程启动前停止")
 
-    def _work(self) -> None:
-        while not self._stop.is_set():
-            task_id = self._queue.get()
-            if task_id is None:
-                self._queue.task_done()
-                break
-            try:
-                task = self.get(task_id)
-                if task["status"] in FINAL_STATES or self._is_cancelled(task_id):
-                    continue
-                with self._state_lock:
-                    self._active_task_ids.add(task_id)
-                self._execute(task_id)
-            except TaskCancelledError:
-                self._complete_worker_cancellation(task_id)
-            except Exception as exc:
-                if self._is_cancelled(task_id):
-                    self._complete_worker_cancellation(task_id)
-                elif self._is_external_error(exc):
-                    self._defer_external(task_id, exc)
-                else:
-                    self._log(task_id, f"任务失败：{exc}")
-                    failure = self._failure_info(task_id, exc)
-                    status = "failed" if failure["failure_class"] == "output" else "waiting_restart"
-                    self.store.update(
-                        task_id,
-                        status=status,
-                        stage="failed",
-                        failure=failure,
-                        error=str(exc),
-                    )
-            finally:
-                with self._state_lock:
-                    self._active_task_ids.discard(task_id)
-                self._queue.task_done()
+    def _run_task(self, task_id: str) -> None:
+        current = threading.current_thread()
+        try:
+            task = self.get(task_id)
+            if task["status"] in FINAL_STATES or self._is_cancelled(task_id):
+                return
+            with self._state_lock:
+                self._pending_task_ids.discard(task_id)
+                self._active_task_ids.add(task_id)
+            self._execute(task_id)
+        except TaskCancelledError:
+            self._complete_task_cancellation(task_id)
+        except Exception as exc:
+            if self._is_cancelled(task_id):
+                self._complete_task_cancellation(task_id)
+            elif self._is_external_error(exc):
+                self._defer_external(task_id, exc)
+            else:
+                self._log(task_id, f"任务失败：{exc}")
+                failure = self._failure_info(task_id, exc)
+                status = "failed" if failure["failure_class"] == "output" else "waiting_restart"
+                self.store.update(
+                    task_id,
+                    status=status,
+                    stage="failed",
+                    failure=failure,
+                    error=str(exc),
+                )
+        finally:
+            with self._state_lock:
+                self._pending_task_ids.discard(task_id)
+                self._active_task_ids.discard(task_id)
+                if self._task_threads.get(task_id) is current:
+                    self._task_threads.pop(task_id, None)
 
     def _reconcile(self, task_id: str) -> str:
-        self._log(task_id, "开始与超算任务对账")
+        self._log(task_id, "开始与 tx-lab 任务对账")
         self._raise_if_cancelled(task_id)
         status = self.hpc.status(task_id)
+        self._merge_remote_profile(task_id, status)
         if status["status"] == "running":
             self.store.update(task_id, status="running", stage="running", failure=None, error=None)
             return "monitor"
@@ -823,6 +1004,7 @@ class WrfTaskManager:
         while not self._stop.is_set():
             self._raise_if_cancelled(task_id)
             status = self.hpc.status(task_id)
+            self._merge_remote_profile(task_id, status)
             remote_log = status.get("log", "")
             if remote_log and remote_log != last_log:
                 self._log(task_id, "--- 远端日志快照 ---\n" + remote_log)
@@ -836,6 +1018,18 @@ class WrfTaskManager:
             self._stop.wait(self.settings.hpc_poll_seconds)
         return False
 
+    def _merge_remote_profile(self, task_id: str, status: dict[str, Any]) -> None:
+        profile = status.get("runtime_profile") or {}
+        if not isinstance(profile, dict) or not profile.get("actual"):
+            return
+        self._merge_runtime(
+            task_id,
+            requested_runtime_profile=profile.get("requested", "cpu"),
+            active_runtime_profile=profile["actual"],
+            fallback_used=bool(profile.get("fallback_used")),
+            fallback_reason="gpu_runtime_error" if profile.get("fallback_used") else None,
+        )
+
     def _finalize(self, task_id: str, cycle: str, *, allow_partial: bool = False) -> None:
         self._raise_if_cancelled(task_id)
         task = self.get(task_id)
@@ -846,12 +1040,12 @@ class WrfTaskManager:
         invalid_outputs = list(validation.get("invalid") or [])
         if invalid_outputs and not allow_partial:
             names = ", ".join(str(item.get("name") or "unknown") for item in invalid_outputs[:5])
-            raise RuntimeError(f"超算 wrfout 完整性校验失败：{names}；可手动选择忽略坏帧并部分渲染")
+            raise RuntimeError(f"tx-lab wrfout 完整性校验失败：{names}；可手动选择忽略不可读帧并部分渲染")
         valid_names = {str(item["name"]) for item in validation.get("valid") or [] if item.get("name")}
         run_dir = self.settings.run_dir / task_id
         raw_dir = run_dir / "raw"
         self.store.update(task_id, status="rendering", stage="downloading_outputs", progress=88)
-        self._log(task_id, "下载超算 wrfout 结果")
+        self._log(task_id, "下载 tx-lab wrfout 结果")
         last_download_progress = 88
 
         def download_progress(done: int, total: int) -> None:
@@ -910,7 +1104,7 @@ class WrfTaskManager:
             failure=None,
             error=None,
         )
-        self._log(task_id, "任务部分完成，坏帧已排除并记录质量告警" if partial else "任务完成，WebP 与 scene.meta.json 已生成")
+        self._log(task_id, "任务部分完成，不可读帧已排除并记录质量告警" if partial else "任务完成，WebP 与 scene.meta.json 已生成")
 
     def _execute(self, task_id: str) -> None:
         task = self.get(task_id)
@@ -965,6 +1159,26 @@ class WrfTaskManager:
                 return
 
         request = task["request"]
+        if not runtime.get("remote_pid") and not runtime.get("remote_launch_attempted"):
+            normalized_request = normalize_task_request(request)
+            if normalized_request != request:
+                request = normalized_request
+                self.store.update(task_id, request=request)
+                request_path = self.settings.run_dir / task_id / "task.request.json"
+                if request_path.parent.is_dir():
+                    request_path.write_text(
+                        json.dumps(request, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                self._log(task_id, "未启动任务已按当前策略固定为 CPU 与 6 小时 spin-up")
+        requested_profile = FIXED_RUNTIME_PROFILE
+        self._merge_runtime(
+            task_id,
+            requested_runtime_profile=requested_profile,
+            active_runtime_profile=requested_profile,
+            fallback_used=False,
+            fallback_reason=None,
+        )
         start = datetime.fromisoformat(request["start_time"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(request["end_time"].replace("Z", "+00:00"))
         spinup_hours = resolve_spinup_hours(request)
@@ -981,7 +1195,8 @@ class WrfTaskManager:
         self._raise_if_cancelled(task_id)
         cycle, _ = self.gfs.select_cycle(model_start, end)
         self._raise_if_cancelled(task_id)
-        hours = self.gfs.required_hours(model_start, end, int(request["forecast_interval_hours"]), cycle)
+        interval = int(request.get("forecast_interval_hours") or 1)
+        hours = self.gfs.required_hours(model_start, end, interval, cycle)
         self._merge_runtime(
             task_id,
             gfs_cycle=cycle,
@@ -992,21 +1207,30 @@ class WrfTaskManager:
 
         with self._prepare_cycle(task_id, cycle):
             self.store.update(task_id, stage="checking_hpc_gfs", progress=4)
-            self._log(task_id, f"仅检查超算 GFS 数据池：{cycle}，共 {len(hours)} 个时次")
+            self._log(task_id, f"检查 tx-lab GFS 数据池：{cycle}，任务间隔 {interval} 小时，共 {len(hours)} 个时次")
             last_ready = -1
+            logged_cleanup_paths: set[str] = set()
 
             def remote_gfs_progress(snapshot: dict[str, Any]) -> None:
                 nonlocal last_ready
+                deleted_paths = set((snapshot.get("auto_cleanup") or {}).get("deleted") or [])
+                new_cleanup_paths = sorted(deleted_paths - logged_cleanup_paths)
+                if new_cleanup_paths:
+                    logged_cleanup_paths.update(new_cleanup_paths)
+                    self._log(task_id, f"已自动清理旧 GFS 周期：{', '.join(new_cleanup_paths)}")
                 ready = len(snapshot.get("valid_hours") or [])
+                download = snapshot.get("download") or {}
                 if ready != last_ready:
                     last_ready = ready
-                    self._log(task_id, f"等待超算共享下载：{ready}/{len(hours)} 个任务时次已就绪")
+                    self._log(task_id, f"等待 tx-lab 共享下载：{ready}/{len(hours)} 个任务时次已就绪")
                 self._merge_runtime(
                     task_id,
                     gfs_remote_reused=ready,
                     gfs_remote_missing=len(snapshot.get("missing_hours") or []),
                     gfs_total=len(hours),
                     gfs_download_owner="hpc_shared_pool",
+                    gfs_download_state=download.get("status"),
+                    gfs_download_detail=download.get("detail"),
                 )
                 self.store.update(
                     task_id,
@@ -1021,11 +1245,12 @@ class WrfTaskManager:
                     hours,
                     progress=remote_gfs_progress,
                     cancelled=lambda: self._is_cancelled(task_id) or self._stop.is_set(),
+                    protected_cycles=self.protected_gfs_cycles(),
                 )
             else:
                 remote_cache = self.hpc.inspect_gfs_files(cycle, hours)
                 if remote_cache.get("missing_hours"):
-                    raise RuntimeError("超算 GFS 数据池不完整，且连接客户端不支持远端共享下载")
+                    raise RuntimeError("tx-lab GFS 数据池不完整，且连接客户端不支持远端共享下载")
             verified_entries = list(remote_cache.get("entries") or [])
             self._merge_runtime(
                 task_id,
@@ -1034,7 +1259,7 @@ class WrfTaskManager:
                 gfs_total=len(hours),
                 gfs_download_owner="hpc_shared_pool",
             )
-            self._log(task_id, "超算完整 GFS 文件校验通过，任务将直接复用共享数据池")
+            self._log(task_id, "tx-lab 完整 GFS 文件校验通过，任务将直接复用共享数据池")
             self.store.update(task_id, progress=65, stage="remote_gfs_ready")
             self._raise_if_cancelled(task_id)
 
@@ -1050,7 +1275,7 @@ class WrfTaskManager:
                 return
             last_transfer_status = marker
             self._merge_runtime(task_id, hpc_transfer=transfer)
-            self._log(task_id, f"超算文件传输：{marker[0]} - {marker[1]}")
+            self._log(task_id, f"tx-lab 文件传输：{marker[0]} - {marker[1]}")
 
         self._raise_if_cancelled(task_id)
         run_dir = self.settings.run_dir / task_id
@@ -1097,7 +1322,7 @@ class WrfTaskManager:
         self._merge_runtime(task_id, remote_launch_attempted=True)
         launch = self.hpc.launch(task_id)
         self._merge_runtime(task_id, **launch)
-        self._log(task_id, f"超算任务已启动，PID {launch['remote_pid']}")
+        self._log(task_id, f"tx-lab 任务已启动，PID {launch['remote_pid']}")
         if self._is_cancelled(task_id):
             self.store.update(task_id, status="cancel_pending", stage="cancel_pending")
             self._start_remote_cancel(task_id)
