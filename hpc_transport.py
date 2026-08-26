@@ -529,9 +529,17 @@ class HpcClient:
 
     def _run_direct(self, command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
         except subprocess.TimeoutExpired as exc:
-            raise HpcError("超算命令执行超时") from exc
+            raise HpcError("tx-lab 命令执行超时") from exc
         if result.returncode:
             message = (result.stderr or result.stdout or "超算命令失败").strip()
             if "permission denied" in message.lower():
