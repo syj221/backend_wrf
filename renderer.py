@@ -319,13 +319,17 @@ def render_run(
     )
     if time_adjustments:
         warnings.append(f"{len(time_adjustments)} 个输出时次已在容差内对齐至计划时次")
+    source = str(task_request.get("data_source") or "gfs").strip().lower()
+    source_label = "ECMWF" if source in {"ec", "ecmwf"} else "GFS"
     manifest = {
         "schema_version": "1.2",
         "image_format": "webp",
         "business_type": "WRF",
         "task_id": task_id,
-        "data_source": "GFS",
+        "data_source": source_label,
+        "forcing_cycle": cycle,
         "gfs_cycle": cycle,
+        **({"ecmwf_cycle": cycle} if source_label == "ECMWF" else {}),
         "start_time": task_request["start_time"],
         "end_time": task_request["end_time"],
         "center": task_request["center"],

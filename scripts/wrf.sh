@@ -289,7 +289,22 @@ resolve_grib_filter() {
         printf '%s\n' "${WRF_GRIB_FILTER}"
         return 0
     fi
-    command -v grib_filter 2>/dev/null || return 1
+    if command -v grib_filter >/dev/null 2>&1; then
+        command -v grib_filter
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        "${HOME:-/home/tx-lab}/anaconda3/envs/ghi/bin/grib_filter" \
+        "${HOME:-/home/tx-lab}/anaconda3/envs/xyf_passat/bin/grib_filter" \
+        "${HOME:-/home/tx-lab}/anaconda3/pkgs/eccodes-2.27.0-h164a9dd_0/bin/grib_filter" \
+        "${HOME:-/home/tx-lab}/anaconda3/pkgs/eccodes-2.23.0-h11d1a29_2/bin/grib_filter"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 prepare_ec_grib_for_wps() {
@@ -1253,6 +1268,20 @@ WPS_EOF
         log_info "Vtable设置完成 (ECMWF)"
     else
         log_warn "未找到标准Vtable，请手动设置"
+    fi
+    if [ "${WRF_DATA_SOURCE:-era5}" = "ec" ] && [ -f Vtable ]; then
+        local ec_vtable_source
+        ec_vtable_source=$(readlink -f Vtable 2>/dev/null || printf '%s\n' Vtable)
+        cp -f "$ec_vtable_source" Vtable.ec_open_data
+        sed -i -E \
+            -e 's/^([[:space:]]*165[[:space:]]*\|)[[:space:]]*1[[:space:]]*\|[[:space:]]*0[[:space:]]*\|/\1 105  |  10  |/' \
+            -e 's/^([[:space:]]*166[[:space:]]*\|)[[:space:]]*1[[:space:]]*\|[[:space:]]*0[[:space:]]*\|/\1 105  |  10  |/' \
+            -e 's/^([[:space:]]*167[[:space:]]*\|)[[:space:]]*1[[:space:]]*\|[[:space:]]*0[[:space:]]*\|/\1 105  |   2  |/' \
+            -e 's/^([[:space:]]*168[[:space:]]*\|)[[:space:]]*1[[:space:]]*\|[[:space:]]*0[[:space:]]*\|/\1 105  |   2  |/' \
+            -e 's/^([[:space:]]*151[[:space:]]*\|)[[:space:]]*1[[:space:]]*\|[[:space:]]*0[[:space:]]*\|/\1 102  |   0  |/' \
+            Vtable.ec_open_data
+        ln -sf Vtable.ec_open_data Vtable
+        log_info "Vtable设置完成 (EC Open Data GRIB1 兼容表)"
     fi
 
     # 3.4 运行link_grib.csh

@@ -1256,6 +1256,7 @@ class HpcClient:
             (script_dir / "wrf_hpc_gfs.sh", f"{service_dir}/wrf_hpc_gfs.sh"),
             (script_dir / "download_gfs_00z.sh", f"{service_dir}/download_gfs_00z.sh"),
             (script_dir / "download_ecmwf_00z.sh", f"{service_dir}/download_ecmwf_00z.sh"),
+            (script_dir / "ecmwf_to_wps.filter", f"{service_dir}/ecmwf_to_wps.filter"),
             (config_path, f"{task_dir}/task.json"),
             (environment_path, f"{task_dir}/task.env"),
             (expected_forcing_path, f"{task_dir}/forcing.expected.tsv"),
@@ -2279,6 +2280,7 @@ class HpcClient:
             f"WRF_NONINTERACTIVE=true "
             f"WRF_GFS_DATA_ROOT={self.settings.hpc_gfs_dir} "
             f"WRF_EC_CACHE_ROOT={self.settings.hpc_ec_dir} "
+            f"WRF_EC_GRIB_FILTER={service_dir}/ecmwf_to_wps.filter "
             f"WRF_GFS_MOUNT={self.settings.hpc_gfs_mount} "
         )
         preflight = self.run(

@@ -1,0 +1,90 @@
+# Convert ECMWF Open Data GRIB2 fields that use CCSDS/AEC packing into
+# GRIB1/simple packing that the current WPS/ungrib build can decode.
+#
+# ECMWF Open Data files also contain experimental/local parameters that older
+# WPS ungrib builds can segfault on. Keep only the fields useful to WRF/WPS.
+if (
+    paramId == 129 || paramId == 156 || paramId == 130 || paramId == 131 ||
+    paramId == 132 || paramId == 133 || paramId == 157 || paramId == 165 ||
+    paramId == 166 || paramId == 167 || paramId == 168 || paramId == 172 ||
+    paramId == 134 || paramId == 151 || paramId == 235 || paramId == 34  ||
+    paramId == 141 || paramId == 33  || paramId == 228
+) {
+    set edition = 1;
+    set packingType = "grid_simple";
+    write;
+}
+
+if (paramId == 260360 && level == 0) {
+    set paramId = 139;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 0;
+    set bottomLevel = 7;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260360 && level == 1) {
+    set paramId = 170;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 7;
+    set bottomLevel = 28;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260360 && level == 2) {
+    set paramId = 183;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 28;
+    set bottomLevel = 100;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260360 && level == 3) {
+    set paramId = 236;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 100;
+    set bottomLevel = 255;
+    set packingType = "grid_simple";
+    write;
+}
+
+if (paramId == 260199 && level == 0) {
+    set paramId = 39;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 0;
+    set bottomLevel = 7;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260199 && level == 1) {
+    set paramId = 40;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 7;
+    set bottomLevel = 28;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260199 && level == 2) {
+    set paramId = 41;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 28;
+    set bottomLevel = 100;
+    set packingType = "grid_simple";
+    write;
+}
+if (paramId == 260199 && level == 3) {
+    set paramId = 42;
+    set edition = 1;
+    set indicatorOfTypeOfLevel = 112;
+    set topLevel = 100;
+    set bottomLevel = 255;
+    set packingType = "grid_simple";
+    write;
+}
