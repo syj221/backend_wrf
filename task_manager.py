@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from config import Settings
+from catalog_publisher import publish_workbench_result
 from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError, write_task_bundle
@@ -654,6 +655,20 @@ class WrfTaskManager:
         self._log(task_id, "用户确认忽略不可读帧，已开始部分结果渲染动态调度")
         return task
 
+    def retry_catalog_publish(self, task_id: str) -> dict[str, Any]:
+        task = self.get(task_id)
+        if task["status"] != "succeeded" or not task.get("result"):
+            raise TaskConflictError("只有完整成功的 WRF 任务可以重试统一目录发布")
+        manifest = (task.get("result") or {}).get("meta_json")
+        if not isinstance(manifest, dict):
+            raise TaskConflictError("任务缺少可发布的 scene.meta.json")
+        publication = self._publish_catalog_result(task_id, task, manifest)
+        runtime = dict(task.get("runtime") or {})
+        runtime["catalog_publication"] = publication
+        result = dict(task.get("result") or {})
+        result["catalog_publication"] = publication
+        return self.store.update(task_id, runtime=runtime, result=result)
+
     @staticmethod
     def _managed_task_path(root: Path, task_id: str) -> Path:
         base = root.resolve()
@@ -733,6 +748,26 @@ class WrfTaskManager:
         runtime = dict(task.get("runtime") or {})
         runtime.update(values)
         return self.store.update(task_id, runtime=runtime)
+
+    def _publish_catalog_result(
+        self,
+        task_id: str,
+        task: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.settings.catalog_publish_enabled:
+            return {"status": "disabled"}
+        source_dir = self.settings.output_dir / "runs" / task_id
+        try:
+            return publish_workbench_result(
+                task_id,
+                str(task.get("owner_sub") or ""),
+                source_dir,
+                manifest,
+                self.settings.catalog_data_root,
+            )
+        except Exception as exc:
+            return {"status": "failed", "error": str(exc), "retryable": True}
 
     @staticmethod
     def _is_external_error(exc: Exception) -> bool:
@@ -1114,6 +1149,13 @@ class WrfTaskManager:
         }
         partial = manifest.get("quality", {}).get("status") == "partial"
         final_status = "partial_success" if partial else "succeeded"
+        publication = (
+            {"status": "skipped", "reason": "partial WRF results are not catalogued"}
+            if partial
+            else self._publish_catalog_result(task_id, task, manifest)
+        )
+        result["catalog_publication"] = publication
+        self._merge_runtime(task_id, catalog_publication=publication)
         self.store.update(
             task_id,
             status=final_status,

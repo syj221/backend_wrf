@@ -60,6 +60,8 @@ python main.py
 ## 主要配置
 
 - `WRF_PORT`：默认 `8007`。
+- `WRF_CATALOG_PUBLISH_ENABLED`：默认开启；完整成功任务会把 WebP 与 `scene.meta.json` 发布到统一数据目录，部分结果不会登记。
+- `WRF_CATALOG_DATA_ROOT`：默认指向工作区 `backend_system/data`。统一目录发布失败只记录在任务的 `catalog_publication` 子状态，可通过 `POST /api/wrf/tasks/{task_id}/publish` 重试，不会重跑 WPS/WRF。
 - 任务调度固定为 `dynamic`，不再读取 `WRF_MAX_CONCURRENT_TASKS`。
 - `WRF_HPC_HOST` / `WRF_HPC_PORT` / `WRF_HPC_USER`：默认 `10.255.248.88` / `1301` / `tx-lab`。
 - `WRF_HPC_CONNECTION_MODE` / `WRF_HPC_AUTH_MODE`：默认 `direct` / `key`。

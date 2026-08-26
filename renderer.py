@@ -319,6 +319,12 @@ def render_run(
     )
     if time_adjustments:
         warnings.append(f"{len(time_adjustments)} 个输出时次已在容差内对齐至计划时次")
+    default_variables = [
+        str(item.get("name") or "")
+        for item in (domains[-1].get("variables") or [])
+        if item.get("name")
+    ] if domains else []
+    default_variable = "T2" if "T2" in default_variables else (default_variables[0] if default_variables else "")
     source = str(task_request.get("data_source") or "gfs").strip().lower()
     source_label = "ECMWF" if source in {"ec", "ecmwf"} else "GFS"
     manifest = {
@@ -334,7 +340,7 @@ def render_run(
         "end_time": task_request["end_time"],
         "center": task_request["center"],
         "default_domain": domains[-1]["id"],
-        "default_variable": "T2",
+        "default_variable": default_variable,
         "domains": domains,
         "quality": {
             "status": "partial" if partial else "complete",

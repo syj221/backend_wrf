@@ -25,6 +25,10 @@ class Settings:
     data_dir: Path = Path(os.getenv("WRF_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
     run_dir: Path = Path(os.getenv("WRF_RUN_DATA_DIR", BASE_DIR / "data" / "runs")).expanduser().resolve()
     database_path: Path = Path(os.getenv("WRF_DATABASE_PATH", BASE_DIR / "data" / "wrf_tasks.sqlite3")).expanduser().resolve()
+    catalog_publish_enabled: bool = _flag("WRF_CATALOG_PUBLISH_ENABLED", True)
+    catalog_data_root: Path = Path(
+        os.getenv("WRF_CATALOG_DATA_ROOT", BASE_DIR.parent / "backend_system" / "data")
+    ).expanduser().resolve()
     hpc_host: str = os.getenv("WRF_HPC_HOST", "10.255.248.88").strip()
     hpc_port: int = max(1, min(65535, int(os.getenv("WRF_HPC_PORT", "1301"))))
     hpc_user: str = os.getenv("WRF_HPC_USER", "tx-lab").strip()

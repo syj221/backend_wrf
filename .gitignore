@@ -1,9 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-.idea/
 .env
-.ssh/
 data/runs/
 data/*.sqlite3
 data/*.sqlite3-*
@@ -13,4 +11,5 @@ data/WRF/runs/
 *.nc
 wrfout*
 wrfrst*
-tests/
+tests/*
+

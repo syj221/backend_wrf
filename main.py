@@ -509,6 +509,21 @@ def render_partial_outputs(task_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/api/wrf/tasks/{task_id}/publish", status_code=202)
+def retry_catalog_publish(task_id: str, request: Request) -> dict[str, Any]:
+    try:
+        get_visible_task(task_id, request)
+        task = task_manager.retry_catalog_publish(task_id)
+        publication = ((task.get("result") or {}).get("catalog_publication") or {})
+        if publication.get("status") == "failed":
+            raise HTTPException(status_code=503, detail=publication)
+        return ok(task, message="WRF 展示产品已登记到统一数据目录")
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/wrf/tasks/{task_id}/result")
 def task_result(task_id: str, request: Request) -> dict[str, Any]:
     task = get_visible_task(task_id, request)
