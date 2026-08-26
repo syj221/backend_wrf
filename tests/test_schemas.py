@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from schemas import WrfTaskCreate
+from schemas import (
+    FIXED_FORECAST_FOCUS,
+    FIXED_RUNTIME_PROFILE,
+    FIXED_SPINUP_HOURS,
+    WrfTaskCreate,
+    normalize_task_request,
+)
 
 
 def valid_request() -> dict:
@@ -23,17 +29,31 @@ def test_valid_nested_domains_are_normalized() -> None:
     request = WrfTaskCreate.model_validate(valid_request())
     assert request.domains[1].parent_grid_ratio == 3
     assert request.start_time.isoformat().endswith("+00:00")
-    assert request.spinup.mode == "off"
-    assert request.spinup.hours == 0
+    assert "spinup" not in request.model_fields_set
+    assert "runtime_profile" not in request.model_fields_set
+    assert "forecast_focus" not in request.model_fields_set
 
 
-def test_spinup_and_per_domain_physics_are_validated() -> None:
+def test_legacy_execution_fields_are_ignored_and_normalized() -> None:
     value = valid_request()
-    value["spinup"] = {"mode": "auto"}
+    value["runtime_profile"] = "gpu"
+    value["spinup"] = {"mode": "custom", "hours": 24}
     value["forecast_focus"] = "convection"
+    public_request = WrfTaskCreate.model_validate(value).model_dump(mode="json")
+    normalized = normalize_task_request(public_request)
+
+    assert "runtime_profile" not in public_request
+    assert "spinup" not in public_request
+    assert "forecast_focus" not in public_request
+    assert normalized["runtime_profile"] == FIXED_RUNTIME_PROFILE
+    assert normalized["spinup"] == {"mode": "custom", "hours": FIXED_SPINUP_HOURS}
+    assert normalized["forecast_focus"] == FIXED_FORECAST_FOCUS
+
+
+def test_per_domain_physics_are_validated() -> None:
+    value = valid_request()
     value["physics"] = {"cu_physics_by_domain": [1, 3], "sf_urban_physics_by_domain": [0, 0]}
     request = WrfTaskCreate.model_validate(value)
-    assert request.spinup.mode == "auto"
     assert request.physics.cu_physics_by_domain == [1, 3]
 
 
@@ -62,4 +82,19 @@ def test_domain_grid_size_is_limited() -> None:
     value = valid_request()
     value["domains"][0]["e_we"] = 501
     with pytest.raises(ValidationError):
+        WrfTaskCreate.model_validate(value)
+
+
+def test_fixed_spinup_only_accepts_divisible_forecast_intervals() -> None:
+    value = valid_request()
+    value["forecast_interval_hours"] = 12
+    with pytest.raises(ValidationError):
+        WrfTaskCreate.model_validate(value)
+
+
+def test_outer_domain_must_stay_inside_regional_gfs_bounds() -> None:
+    value = valid_request()
+    value["center"] = {"lat": 57, "lon": 140}
+
+    with pytest.raises(ValidationError, match="中国区域 GFS 覆盖范围"):
         WrfTaskCreate.model_validate(value)

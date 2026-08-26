@@ -25,6 +25,191 @@ class FakeHpc:
         pass
 
 
+def test_submit_normalizes_legacy_execution_fields(tmp_path) -> None:
+    cfg = replace(
+        settings,
+        data_dir=tmp_path / "data",
+        run_dir=tmp_path / "runs",
+        database_path=tmp_path / "tasks.sqlite3",
+    )
+    store = TaskStore(cfg.database_path)
+    manager = WrfTaskManager(cfg, store, object(), FakeHpc())
+    try:
+        task = manager.submit(
+            {
+                "start_time": "2026-07-16T00:00:00Z",
+                "end_time": "2026-07-16T06:00:00Z",
+                "runtime_profile": "gpu",
+                "forecast_focus": "convection",
+                "spinup": {"mode": "custom", "hours": 24},
+            }
+        )
+
+        assert task["request"]["runtime_profile"] == "cpu"
+        assert task["request"]["forecast_focus"] == "general"
+        assert task["request"]["spinup"] == {"mode": "custom", "hours": 6}
+        assert task["runtime"]["requested_runtime_profile"] == "cpu"
+    finally:
+        store.close()
+
+
+def test_sync_latest_gfs_cleans_then_triggers_missing_cycle() -> None:
+    events = []
+
+    class EmptyStore:
+        def active(self):
+            return []
+
+    class LatestGfs:
+        def latest_cycles(self, count=1):
+            return ["2026072900", "2026072800", "2026072700"][:count]
+
+    class PrefetchHpc(FakeHpc):
+        def auto_cleanup_gfs_cycles(self, target_cycles, protected_cycles):
+            events.append(("cleanup", target_cycles, protected_cycles))
+            return {"requested": [], "deleted": [], "missing": []}
+
+        def gfs_pool_items(self, target_cycles, protected_cycles):
+            events.append(("pool", target_cycles, protected_cycles))
+            return [{"cycles": [{"cycle": "2026072900", "complete": False}]}]
+
+        def trigger_gfs_download(self, cycle, horizon):
+            events.append(("trigger", cycle, horizon))
+            return {"cycle": cycle, "status": "started", "detail": "12345"}
+
+    manager = WrfTaskManager(settings, EmptyStore(), LatestGfs(), PrefetchHpc())
+
+    result = manager.sync_latest_gfs()
+
+    assert result["target_cycles"] == ["2026072900"]
+    assert result["actions"] == [
+        {"cycle": "2026072900", "status": "started", "detail": "12345"}
+    ]
+    assert events == [
+        ("cleanup", ["2026072900"], {"2026072900", "2026072800"}),
+        ("pool", ["2026072900"], {"2026072900", "2026072800"}),
+        ("trigger", "2026072900", 72),
+    ]
+
+
+def test_background_cycle_sync_starts_oldest_retained_cycle_first() -> None:
+    triggered = []
+
+    class EmptyStore:
+        def active(self):
+            return []
+
+    class RetainedGfs:
+        def latest_cycles(self, count=1):
+            return ["2026073000", "2026072900", "2026072800"][:count]
+
+    class PrefetchHpc(FakeHpc):
+        def gfs_pool_items(self, *_args):
+            return [{"cycles": []}]
+
+        def trigger_gfs_download(self, cycle, horizon):
+            triggered.append((cycle, horizon))
+            return {"cycle": cycle, "status": "running", "detail": "shared"}
+
+    manager = WrfTaskManager(settings, EmptyStore(), RetainedGfs(), PrefetchHpc())
+
+    result = manager.sync_latest_gfs(
+        cleanup_old_cycles=False,
+        target_cycles=["2026073000", "2026072900", "2026072800"],
+    )
+
+    assert [item["cycle"] for item in result["actions"]] == [
+        "2026072800",
+        "2026072900",
+        "2026073000",
+    ]
+    assert triggered == [
+        ("2026072800", 72),
+        ("2026072900", 72),
+        ("2026073000", 72),
+    ]
+
+
+def test_prefetch_latest_gfs_records_background_download_state() -> None:
+    class EmptyStore:
+        def active(self):
+            return []
+
+    manager = WrfTaskManager(settings, EmptyStore(), object(), FakeHpc())
+    manager._health = {"status": "ready", "message": "test"}
+    sync_calls = []
+
+    class RetainedGfs:
+        def latest_cycles(self, count=1):
+            return ["2026072900", "2026072800", "2026072700"][:count]
+
+    manager.gfs = RetainedGfs()
+
+    def sync_latest_gfs(*, cleanup_old_cycles=True, target_cycles=None):
+        sync_calls.append((cleanup_old_cycles, target_cycles))
+        return {
+            "target_cycles": target_cycles,
+            "actions": [{"cycle": "2026072900", "status": "running", "detail": "shared"}],
+            "auto_cleanup": {"requested": [], "deleted": [], "missing": []},
+        }
+
+    manager.sync_latest_gfs = sync_latest_gfs
+
+    manager._prefetch_latest_gfs_once()
+
+    status = manager.gfs_prefetch_status
+    assert status["status"] == "downloading"
+    assert status["target_cycles"] == ["2026072900", "2026072800"]
+    assert status["updated_at"].endswith("Z")
+    assert sync_calls == [(True, ["2026072900", "2026072800"])]
+
+
+def test_prefetch_pauses_while_task_needs_gfs() -> None:
+    class WaitingStore:
+        def active(self):
+            return [{
+                "id": "wrf_gfs_20260730T000000Z_deadbeef",
+                "status": "prefetching",
+                "stage": "waiting_for_hpc_gfs",
+                "runtime": {"gfs_cycle": "2026072800"},
+            }]
+
+    manager = WrfTaskManager(settings, WaitingStore(), object(), FakeHpc())
+    manager._health = {"status": "ready", "message": "test"}
+    manager.sync_latest_gfs = lambda **_kwargs: pytest.fail("任务等待数据时不应启动后台预取")
+
+    manager._prefetch_latest_gfs_once()
+
+    status = manager.gfs_prefetch_status
+    assert status["status"] == "paused_for_task"
+    assert status["task_demand"] == {"task_count": 1, "cycles": ["2026072800"]}
+
+
+def test_start_and_stop_manage_gfs_prefetch_thread(monkeypatch) -> None:
+    class EmptyStore:
+        def active(self):
+            return []
+
+    cfg = replace(
+        settings,
+        hpc_gfs_prefetch_start_delay_seconds=0,
+        hpc_gfs_prefetch_interval_seconds=60,
+    )
+    manager = WrfTaskManager(cfg, EmptyStore(), object(), FakeHpc())
+    checked = threading.Event()
+    monkeypatch.setattr(manager, "_prefetch_latest_gfs_once", checked.set)
+
+    manager.start()
+    prefetch_thread = manager._gfs_prefetch_thread
+    try:
+        assert checked.wait(1)
+        assert prefetch_thread is not None and prefetch_thread.is_alive()
+    finally:
+        manager.stop()
+
+    assert prefetch_thread is not None and not prefetch_thread.is_alive()
+
+
 def test_new_task_id_includes_gfs_data_source() -> None:
     task_id = WrfTaskManager.new_task_id()
 
@@ -32,7 +217,7 @@ def test_new_task_id_includes_gfs_data_source() -> None:
     assert SAFE_TASK_ID.fullmatch(task_id)
 
 
-def test_retry_outputs_requeues_same_task_without_new_wrf_run() -> None:
+def test_retry_outputs_dispatches_same_task_without_new_wrf_run(monkeypatch) -> None:
     task_id = "wrf_gfs_20260718T000000Z_deadbeef"
     task = {
         "id": task_id,
@@ -57,6 +242,8 @@ def test_retry_outputs_requeues_same_task_without_new_wrf_run() -> None:
 
     manager = WrfTaskManager(settings, MemoryStore(), None, FakeHpc())
     manager._log = lambda *_args: None
+    dispatched = []
+    monkeypatch.setattr(manager, "_dispatch", lambda value: dispatched.append(value) or True)
 
     result = manager.retry_outputs(task_id)
 
@@ -64,7 +251,7 @@ def test_retry_outputs_requeues_same_task_without_new_wrf_run() -> None:
     assert result["status"] == "queued"
     assert result["stage"] == "retrying_outputs"
     assert result["runtime"]["retry_outputs_only"] is True
-    assert manager._queue.get_nowait() == task_id
+    assert dispatched == [task_id]
 
 
 def test_retry_outputs_rejects_remote_wrf_failure() -> None:
@@ -229,8 +416,7 @@ def test_start_finishes_prelaunch_cancel_pending_without_requeue(monkeypatch) ->
             tasks[task_id].update(values)
             return tasks[task_id]
 
-    cfg = replace(settings, max_concurrent_tasks=1)
-    manager = WrfTaskManager(cfg, QueueStore(), None, FakeHpc())
+    manager = WrfTaskManager(settings, QueueStore(), None, FakeHpc())
     executed = threading.Event()
     seen = []
     monkeypatch.setattr(manager, "_log", lambda *_args: None)
@@ -272,10 +458,13 @@ def test_execute_skips_local_gfs_when_remote_manifest_is_complete(monkeypatch) -
             return task
 
     class NoDownloadGfs:
+        interval = None
+
         def select_cycle(self, *_args):
             return "2026071600", [0, 12]
 
-        def required_hours(self, *_args):
+        def required_hours(self, _start, _end, interval, _cycle):
+            self.interval = interval
             return [0, 6, 12]
 
         def ensure_cycle(self, *_args, **_kwargs):
@@ -316,7 +505,8 @@ def test_execute_skips_local_gfs_when_remote_manifest_is_complete(monkeypatch) -
             }
 
     hpc = CompleteRemoteHpc()
-    manager = WrfTaskManager(settings, MemoryStore(), NoDownloadGfs(), hpc)
+    gfs = NoDownloadGfs()
+    manager = WrfTaskManager(settings, MemoryStore(), gfs, hpc)
     monkeypatch.setattr(manager, "_log", lambda *_args: None)
     monkeypatch.setattr(manager, "_monitor", lambda *_args: False)
     monkeypatch.setattr("task_manager.write_task_bundle", lambda *_args: None)
@@ -324,6 +514,7 @@ def test_execute_skips_local_gfs_when_remote_manifest_is_complete(monkeypatch) -
     manager._execute(task_id)
 
     assert hpc.prepared is True
+    assert gfs.interval == 6
     assert task["runtime"]["gfs_remote_reused"] == 3
     assert task["runtime"]["hpc_transfer"] == {
         "mode": "pty_fallback",
@@ -410,7 +601,7 @@ def test_execute_never_falls_back_to_local_gfs_upload(monkeypatch) -> None:
     assert hpc.uploaded == []
 
 
-def test_three_workers_run_and_fourth_task_waits(monkeypatch) -> None:
+def test_dynamic_dispatch_runs_all_tasks_and_deduplicates_task_id(monkeypatch) -> None:
     task_ids = [f"wrf_20260716T00000{index}Z_deadbee{index}" for index in range(4)]
     tasks = {
         task_id: {"id": task_id, "status": "queued", "progress": 0, "runtime": {}}
@@ -434,32 +625,29 @@ def test_three_workers_run_and_fourth_task_waits(monkeypatch) -> None:
         def close_session(self):
             self.closed = True
 
-    cfg = replace(settings, max_concurrent_tasks=3)
     hpc = ParallelHpc()
-    manager = WrfTaskManager(cfg, QueueStore(), None, hpc)
+    manager = WrfTaskManager(settings, QueueStore(), None, hpc)
     release = threading.Event()
-    first_three_started = threading.Event()
-    fourth_started = threading.Event()
+    all_started = threading.Event()
     started = []
     started_lock = threading.Lock()
 
     def execute(task_id):
         with started_lock:
             started.append(task_id)
-            if len(started) == 3:
-                first_three_started.set()
             if len(started) == 4:
-                fourth_started.set()
+                all_started.set()
         release.wait(2)
 
     monkeypatch.setattr(manager, "_execute", execute)
     manager.start()
     try:
-        assert first_three_started.wait(2)
-        assert manager.active_task_count == 3
-        assert len(started) == 3
+        assert all_started.wait(2)
+        assert manager.active_task_count == 4
+        assert len(started) == 4
+        assert manager._dispatch(task_ids[0]) is False
+        assert len(started) == 4
         release.set()
-        assert fourth_started.wait(2)
     finally:
         release.set()
         deadline = time.monotonic() + 2
@@ -467,7 +655,7 @@ def test_three_workers_run_and_fourth_task_waits(monkeypatch) -> None:
             time.sleep(0.01)
         manager.stop()
 
-    assert len(started) == 4
+    assert sorted(started) == sorted(task_ids)
     assert hpc.closed is True
 
 
@@ -704,7 +892,6 @@ def test_recommendation_uses_geography_season_and_domain_resolution() -> None:
     request = {
         "center": {"lat": 38.1, "lon": 114.8},
         "start_time": "2026-07-21T00:00:00Z",
-        "forecast_focus": "urban",
         "domains": [
             {"id": "d01", "dx": 9000},
             {"id": "d02", "dx": 3000},
@@ -725,14 +912,14 @@ def test_recommendation_uses_geography_season_and_domain_resolution() -> None:
     assert result["physics"]["bl_pbl_physics"] == 2
     assert result["physics"]["cu_physics_by_domain"] == [3, 0]
     assert result["physics"]["sf_urban_physics_by_domain"] == [0, 1]
-    assert result["spinup"]["hours"] == 12
+    assert "spinup" not in result
+    assert "forecast_focus" not in result
 
 
 def test_recommendation_selects_cold_season_mixed_phase_microphysics() -> None:
     request = {
         "center": {"lat": 45.0, "lon": 126.0},
         "start_time": "2026-01-15T00:00:00Z",
-        "forecast_focus": "snowfall",
         "domains": [{"id": "d01", "dx": 15000}],
     }
     geography = {

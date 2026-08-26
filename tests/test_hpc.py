@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import subprocess
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -15,12 +17,56 @@ from hpc import HpcAuthError, HpcClient, HpcError, write_task_bundle
 from hpc_transport import GFS_PRODUCT, GFS_SCOPE, HpcSessionStaleError
 
 
+def test_default_wrf_source_directories_match_tx_lab_layout() -> None:
+    assert settings.hpc_wrf_source_dir == "/home/tx-lab/WRFwork/WRF_BUILD/WRF_CPU"
+    assert settings.hpc_wrf_gpu_source_dir == "/home/tx-lab/WRFwork/WRF_BUILD/WRF_GPU"
+    script_dir = Path(__file__).parents[1] / "scripts"
+    launch_script = (script_dir / "wrf_hpc_gfs.sh").read_text()
+    runtime_script = (script_dir / "wrf.sh").read_text()
+    assert "/home/tx-lab/WRFwork/WRF_BUILD/WRF_CPU" in launch_script
+    assert "/home/tx-lab/WRFwork/WRF_BUILD/WRF_GPU" not in launch_script
+    assert 'WRF_REQUESTED_RUNTIME_PROFILE="cpu"' in launch_script
+    assert '${WRF_SOURCE_DIR}/main/real.exe' in runtime_script
+    assert '${WRF_SOURCE_DIR}/main/wrf.exe' in runtime_script
+
+
 def test_hpc_health_requires_runtime_directories(monkeypatch) -> None:
     client = HpcClient(replace(settings, hpc_remote_dir="~/WRFwork", hpc_gfs_dir="~/Data/gfsdata"))
-    monkeypatch.setattr(client, "run", lambda *_args, **_kwargs: "缺少: WPS_GEOG")
+    commands: list[str] = []
+
+    def unavailable(command: str, **_kwargs) -> str:
+        commands.append(command)
+        return "缺少: WPS_GEOG"
+
+    monkeypatch.setattr(client, "run", unavailable)
     assert client.health()["status"] == "unavailable"
+    assert f"{settings.hpc_wrf_source_dir}/main/real.exe" in commands[-1]
+    assert f"{settings.hpc_wrf_source_dir}/main/wrf.exe" in commands[-1]
+    assert settings.hpc_wrf_gpu_source_dir not in commands[-1]
     monkeypatch.setattr(client, "run", lambda *_args, **_kwargs: "WRF_HPC_READY")
     assert client.health()["status"] == "ready"
+
+
+def test_direct_transport_uses_port_key_and_strict_known_hosts() -> None:
+    cfg = replace(
+        settings,
+        hpc_connection_mode="direct",
+        hpc_port=1301,
+        hpc_key_file="/tmp/wrf-key",
+        hpc_known_hosts_file="/tmp/wrf-known-hosts",
+    )
+    client = HpcClient(cfg)
+
+    ssh = client._ssh_base()
+    scp = client._scp_base()
+    sftp = client._sftp_base()
+
+    assert ssh[ssh.index("-p") + 1] == "1301"
+    assert scp[scp.index("-P") + 1] == "1301"
+    assert sftp[sftp.index("-P") + 1] == "1301"
+    assert "StrictHostKeyChecking=yes" in ssh
+    assert "UserKnownHostsFile=/tmp/wrf-known-hosts" in ssh
+    assert ssh[ssh.index("-i") + 1] == "/tmp/wrf-key"
 
 
 def test_task_artifact_paths_are_exact_and_exclude_shared_gfs(monkeypatch) -> None:
@@ -30,13 +76,10 @@ def test_task_artifact_paths_are_exact_and_exclude_shared_gfs(monkeypatch) -> No
 
     paths = client.task_artifact_paths(task_id)
 
-    assert paths == [
-        f"/share/home/user/WRFwork/backend_wrf_tasks/{task_id}",
-        f"/share/home/user/WRFwork/WPS_{task_id}",
-        f"/share/home/user/WRFwork/WRF_{task_id}",
-        f"/share/home/user/WRFwork/logs_{task_id}",
-        f"/share/home/user/WRFwork/stage_status_{task_id}.jsonl",
-    ]
+    assert paths[0] == f"/share/home/user/WRFwork/backend_wrf_tasks/{task_id}"
+    assert f"/share/home/user/WRFwork/WRF_{task_id}" in paths
+    assert f"/share/home/user/WRFwork/WRF_{task_id}_attempt-1-gpu" in paths
+    assert f"/share/home/user/WRFwork/WRF_{task_id}_attempt-2-cpu" in paths
     assert all("gfsdata" not in path for path in paths)
 
 
@@ -73,11 +116,12 @@ def test_gfs_pool_marks_only_safe_old_cycles_for_cleanup(monkeypatch) -> None:
 
     assert item["targets_complete"] is True
     assert item["cleanup_candidates"] == ["/share/home/user/Data/gfsdata/2026071900"]
+    assert item["auto_cleanup_candidates"] == ["/share/home/user/Data/gfsdata/2026071900"]
     assert cycles["2026071800"]["cleanup_allowed"] is False
     assert cycles["2026071700"]["protected"] is True
 
 
-def test_gfs_pool_blocks_cleanup_until_both_targets_are_complete(monkeypatch) -> None:
+def test_gfs_pool_allows_old_cycle_cleanup_while_target_is_incomplete(monkeypatch) -> None:
     client = HpcClient(settings)
     monkeypatch.setattr(
         client,
@@ -93,9 +137,40 @@ def test_gfs_pool_blocks_cleanup_until_both_targets_are_complete(monkeypatch) ->
     )
 
     item = client.gfs_pool_items(["2026072100", "2026072000"], set())[0]
+    cycles = {cycle["cycle"]: cycle for cycle in item["cycles"]}
 
     assert item["targets_complete"] is False
-    assert item["cleanup_candidates"] == []
+    assert item["cleanup_candidates"] == ["/share/home/user/Data/gfsdata/2026071900"]
+    assert item["auto_cleanup_candidates"] == ["/share/home/user/Data/gfsdata/2026071900"]
+    assert cycles["2026072100"]["cleanup_allowed"] is False
+    assert cycles["2026072000"]["cleanup_allowed"] is False
+
+
+def test_gfs_pool_never_auto_cleans_cycle_newer_than_historical_target(monkeypatch) -> None:
+    client = HpcClient(settings)
+    monkeypatch.setattr(
+        client,
+        "run",
+        lambda *_args, **_kwargs: "\n".join(
+            [
+                "ROOT|/share/home/user/Data/gfsdata",
+                "2026072200|ready|73|1000|072",
+                "2026072100|missing|0|0|0",
+                "2026072000|ready|73|900|072",
+            ]
+        ),
+    )
+
+    item = client.gfs_pool_items(["2026072100"], set())[0]
+    cycles = {cycle["cycle"]: cycle for cycle in item["cycles"]}
+
+    assert item["cleanup_candidates"] == [
+        "/share/home/user/Data/gfsdata/2026072200",
+        "/share/home/user/Data/gfsdata/2026072000",
+    ]
+    assert item["auto_cleanup_candidates"] == ["/share/home/user/Data/gfsdata/2026072000"]
+    assert cycles["2026072200"]["auto_cleanup_allowed"] is False
+    assert cycles["2026072000"]["auto_cleanup_allowed"] is True
 
 
 def test_gfs_pool_keeps_missing_target_and_exposes_remote_error(monkeypatch) -> None:
@@ -121,6 +196,54 @@ def test_gfs_pool_keeps_missing_target_and_exposes_remote_error(monkeypatch) -> 
     assert cycles["2026072100"]["remote_path"].endswith("/2026072100")
 
 
+def test_gfs_pool_reports_partial_bytes_and_active_downloads(monkeypatch) -> None:
+    client = HpcClient(settings)
+    monkeypatch.setattr(
+        client,
+        "run",
+        lambda *_args, **_kwargs: "\n".join(
+            [
+                "ROOT|/share/home/user/Data/gfsdata",
+                "2026072100|downloading|3|1525922594|002|4|209715200|4|DOWNLOAD f003 mirror=aws",
+            ]
+        ),
+    )
+
+    cycle = client.gfs_pool_items(["2026072100"], set())[0]["cycles"][0]
+
+    assert cycle["partial_files"] == 4
+    assert cycle["partial_size_bytes"] == 209715200
+    assert cycle["active_downloads"] == 4
+    assert cycle["download_message"] == "DOWNLOAD f003 mirror=aws"
+
+
+def test_validate_outputs_isolates_ncdump_without_remote_temp_file(monkeypatch) -> None:
+    client = HpcClient(settings)
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return "VALID|wrfout_d01_2026-07-28_00:00:00|9482145|ok"
+
+    monkeypatch.setattr(client, "run", run)
+
+    result = client.validate_outputs("wrf_gfs_20260729T073138Z_4e412a30")
+
+    assert result == {
+        "valid": [{
+            "name": "wrfout_d01_2026-07-28_00:00:00",
+            "size": 9482145,
+            "reason": "ok",
+        }],
+        "invalid": [],
+        "complete": True,
+    }
+    assert len(commands) == 1
+    assert settings.hpc_runtime_env in commands[0]
+    assert 'LD_LIBRARY_PATH= "$ncdump_path" -h "$name"' in commands[0]
+    assert ".wrfout_sizes_1" not in commands[0]
+
+
 def test_trigger_gfs_download_reports_immediate_remote_failure(monkeypatch) -> None:
     client = HpcClient(settings)
     commands = []
@@ -130,18 +253,206 @@ def test_trigger_gfs_download_reports_immediate_remote_failure(monkeypatch) -> N
         return "FAILED|curl: (28) NOAA request timed out"
 
     monkeypatch.setattr(client, "run", run)
+    monkeypatch.setattr(client, "upload", lambda *_args, **_kwargs: None)
 
-    result = client.trigger_gfs_download("2026072100", 72)
+    result = client.trigger_gfs_download("2026072100", 72, forecast_hours=[12, 15, 18])
 
     assert result == {
         "cycle": "2026072100",
         "status": "failed",
         "detail": "curl: (28) NOAA request timed out",
     }
-    assert "kill -0" in commands[0]
-    assert "download_2026072100.out" in commands[0]
-    assert "download_gfs_00z.sh 20260721" in commands[0]
-    assert "download_gfs_00z.sh 2026072100 72" not in commands[0]
+    assert any("kill -0" in command for command in commands)
+    assert any("flock -n" in command for command in commands)
+    assert all("pgrep -f" not in command for command in commands)
+    assert any("download_2026072100.out" in command for command in commands)
+    assert any("download_gfs_00z.sh 2026072100 72 12,15,18" in command for command in commands)
+    assert any(f"WRF_GFS_MIN_SPEED_BPS={settings.hpc_gfs_min_speed_bps}" in command for command in commands)
+    assert any(f"WRF_GFS_SLOW_SECONDS={settings.hpc_gfs_slow_seconds}" in command for command in commands)
+
+
+def test_trigger_gfs_download_does_not_replace_script_while_lock_is_busy(monkeypatch) -> None:
+    client = HpcClient(settings)
+    monkeypatch.setattr(client, "run", lambda *_args, **_kwargs: "RUNNING")
+
+    def unexpected_upload(*_args, **_kwargs):
+        raise AssertionError("运行中的共享下载不得覆盖远端脚本")
+
+    monkeypatch.setattr(client, "upload", unexpected_upload)
+
+    assert client.trigger_gfs_download("2026072100", 72) == {
+        "cycle": "2026072100",
+        "status": "running",
+        "detail": "shared",
+    }
+
+
+def test_download_script_fetches_regional_files_serially_and_keeps_other_cycles(tmp_path) -> None:
+    fake_bin = tmp_path / "bin"
+    mount_root = tmp_path / "mount"
+    data_root = mount_root / "WRF" / "GFS"
+    fake_bin.mkdir()
+    data_root.mkdir(parents=True)
+    retained_cycle = data_root / "2026072700"
+    retained_cycle.mkdir()
+    (retained_cycle / "keep.txt").write_text("keep", encoding="utf-8")
+
+    commands = {
+        "findmnt": "#!/usr/bin/env bash\nexit 0\n",
+        "flock": "#!/usr/bin/env bash\nexit 0\n",
+        "sleep": "#!/usr/bin/env bash\nexit 0\n",
+        "df": (
+            "#!/usr/bin/env bash\n"
+            "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+            "printf 'fake 200000000 1 199999999 1%% %s\\n' \"${@: -1}\"\n"
+        ),
+        "curl": r'''#!/usr/bin/env bash
+output=""
+url=""
+while (($#)); do
+    case "$1" in
+        --output) output="$2"; shift 2 ;;
+        --connect-timeout|--max-time|--speed-limit|--speed-time|--continue-at)
+            shift 2 ;;
+        --fail|--location|--silent|--show-error) shift ;;
+        http*) url="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "$WRF_TEST_URL_LOG"
+mkdir -p "$(dirname "$output")"
+truncate -s 1048576 "$output"
+printf GRIB | dd of="$output" bs=1 seek=0 conv=notrunc status=none
+printf 7777 | dd of="$output" bs=1 seek=1048572 conv=notrunc status=none
+''',
+    }
+    for name, content in commands.items():
+        path = fake_bin / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "download_gfs_00z.sh"
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "WRF_GFS_DATA_ROOT": str(data_root),
+        "WRF_GFS_MOUNT": str(mount_root),
+        "WRF_GFS_MIN_FREE_GB": "100",
+        "WRF_GFS_MIN_BYTES": "65536",
+        "WRF_GFS_MIN_SPEED_BPS": "1024",
+        "WRF_GFS_SLOW_SECONDS": "30",
+        "WRF_GFS_REQUEST_INTERVAL_SECONDS": "10",
+        "WRF_TEST_URL_LOG": str(tmp_path / "urls.log"),
+    }
+
+    result = subprocess.run(
+        ["bash", str(script), "2026072800", "72", "0,2,3,4,5"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REGIONAL_DOWNLOAD 2026072800 bounds=65,5,145,60 interval=10s" in result.stdout
+    assert "DOWNLOAD_COMPLETE 2026072800 5" in result.stdout
+    outputs = sorted((data_root / "2026072800").glob("gfs.t00z.pgrb2.0p25.f???"))
+    assert len(outputs) == 5
+    assert not (data_root / "2026072800" / "gfs.t00z.pgrb2.0p25.f001").exists()
+    assert all(path.stat().st_size == 1048576 for path in outputs)
+    assert (retained_cycle / "keep.txt").read_text(encoding="utf-8") == "keep"
+    urls = (tmp_path / "urls.log").read_text(encoding="utf-8").splitlines()
+    assert len(urls) == 5
+    assert all("filter_gfs_0p25.pl" in url for url in urls)
+    assert all("all_lev=on&all_var=on" in url for url in urls)
+    assert all("leftlon=65&rightlon=145&toplat=60&bottomlat=5" in url for url in urls)
+
+
+def test_ensure_remote_gfs_stops_on_immediate_download_failure(monkeypatch) -> None:
+    client = HpcClient(settings)
+    monkeypatch.setattr(
+        client,
+        "inspect_gfs_files",
+        lambda *_args, **_kwargs: {"complete": False, "valid_hours": [], "missing_hours": [0]},
+    )
+    monkeypatch.setattr(
+        client,
+        "trigger_gfs_download",
+        lambda *_args, **_kwargs: {"status": "failed", "detail": "404 Not Found"},
+    )
+    monkeypatch.setattr(
+        client,
+        "auto_cleanup_gfs_cycles",
+        lambda *_args, **_kwargs: {"requested": [], "deleted": [], "missing": []},
+    )
+
+    with pytest.raises(HpcError, match="404 Not Found"):
+        client.ensure_remote_gfs("2026072100", [0])
+
+
+def test_ensure_remote_gfs_auto_cleans_before_trigger(monkeypatch) -> None:
+    client = HpcClient(settings)
+    events = []
+    monkeypatch.setattr(
+        client,
+        "inspect_gfs_files",
+        lambda *_args, **_kwargs: {"complete": False, "valid_hours": [], "missing_hours": [0]},
+    )
+
+    def cleanup(target_cycles, protected_cycles):
+        events.append(("cleanup", target_cycles, protected_cycles))
+        return {"requested": ["/gfs/2026072000"], "deleted": ["/gfs/2026072000"], "missing": []}
+
+    def trigger(cycle, horizon, forecast_hours=None):
+        events.append(("trigger", cycle, horizon, forecast_hours))
+        return {"status": "failed", "detail": "download unavailable"}
+
+    monkeypatch.setattr(client, "auto_cleanup_gfs_cycles", cleanup)
+    monkeypatch.setattr(client, "trigger_gfs_download", trigger)
+
+    with pytest.raises(HpcError, match="download unavailable"):
+        client.ensure_remote_gfs(
+            "2026072100",
+            [0],
+            protected_cycles={"2026072000"},
+        )
+
+    assert events == [
+        ("cleanup", ["2026072100"], {"2026072000"}),
+        ("trigger", "2026072100", 72, [0]),
+    ]
+
+
+def test_ensure_remote_gfs_retries_after_shared_lock_is_released(monkeypatch) -> None:
+    client = HpcClient(replace(settings, hpc_gfs_poll_seconds=0, hpc_gfs_wait_seconds=60))
+    snapshots = iter([
+        {"complete": False, "valid_hours": [], "missing_hours": [12, 15]},
+        {"complete": False, "valid_hours": [], "missing_hours": [12, 15]},
+        {"complete": True, "valid_hours": [12, 15], "missing_hours": []},
+    ])
+    triggers = []
+    monkeypatch.setattr(client, "inspect_gfs_files", lambda *_args, **_kwargs: next(snapshots))
+    monkeypatch.setattr(
+        client,
+        "auto_cleanup_gfs_cycles",
+        lambda *_args, **_kwargs: {"requested": [], "deleted": [], "missing": []},
+    )
+
+    def trigger(cycle, horizon, forecast_hours=None):
+        triggers.append((cycle, horizon, forecast_hours))
+        state = "running" if len(triggers) == 1 else "started"
+        return {"cycle": cycle, "status": state, "detail": "shared" if state == "running" else "123"}
+
+    monkeypatch.setattr(client, "trigger_gfs_download", trigger)
+
+    result = client.ensure_remote_gfs("2026072100", [12, 15])
+
+    assert result["complete"] is True
+    assert triggers == [
+        ("2026072100", 72, [12, 15]),
+        ("2026072100", 72, [12, 15]),
+    ]
 
 
 def test_cleanup_gfs_cycles_requires_exact_allowlisted_path(monkeypatch) -> None:
@@ -174,6 +485,34 @@ def test_cleanup_gfs_cycles_requires_exact_allowlisted_path(monkeypatch) -> None
         )
 
 
+def test_auto_cleanup_gfs_cycles_uses_only_auto_allowlist(monkeypatch) -> None:
+    client = HpcClient(settings)
+    allowed = "/share/home/user/Data/gfsdata/2026071900"
+    manual_only = "/share/home/user/Data/gfsdata/2026072200"
+    monkeypatch.setattr(
+        client,
+        "gfs_pool_items",
+        lambda *_args, **_kwargs: [{
+            "cleanup_candidates": [allowed, manual_only],
+            "auto_cleanup_candidates": [allowed],
+        }],
+    )
+    cleaned = []
+
+    def cleanup(paths, target_cycles, protected_cycles):
+        cleaned.extend(paths)
+        assert target_cycles == ["2026072100"]
+        assert protected_cycles == {"2026071800"}
+        return {"deleted": list(paths), "missing": []}
+
+    monkeypatch.setattr(client, "cleanup_gfs_cycles", cleanup)
+
+    result = client.auto_cleanup_gfs_cycles(["2026072100"], {"2026071800"})
+
+    assert cleaned == [allowed]
+    assert result == {"requested": [allowed], "deleted": [allowed], "missing": []}
+
+
 def test_hpc_permission_error_requires_interactive_auth(monkeypatch) -> None:
     client = HpcClient(settings)
 
@@ -183,12 +522,12 @@ def test_hpc_permission_error_requires_interactive_auth(monkeypatch) -> None:
     monkeypatch.setattr(client, "run", deny)
     result = client.health()
     assert result["status"] == "auth_required"
-    assert result["message"] == "需要输入超算登录密码"
-    assert result["connection_mode"] == "bastion"
+    assert result["message"] == "tx-lab SSH 密钥未就绪"
+    assert result["connection_mode"] == "direct"
 
 
 def test_hpc_password_is_kept_only_for_ready_process_session(monkeypatch) -> None:
-    client = HpcClient(settings)
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion"))
     monkeypatch.setattr(client, "health", lambda: {"status": "ready", "message": "WRF_HPC_READY"})
 
     assert client.authenticate_password("session-secret")["status"] == "ready"
@@ -233,7 +572,13 @@ def test_bastion_session_navigates_menus_once_and_is_reused(monkeypatch) -> None
             cls.spawn_args = (args, kwargs)
             return child
 
-    cfg = replace(settings, hpc_auth_mode="password", hpc_password="session-secret")
+    cfg = replace(
+        settings,
+        hpc_host="chaosuan",
+        hpc_connection_mode="bastion",
+        hpc_auth_mode="password",
+        hpc_password="session-secret",
+    )
     client = HpcClient(cfg)
     monkeypatch.setattr(client, "_pexpect", lambda: FakePexpect)
 
@@ -459,7 +804,7 @@ def test_compute_node_may_request_same_password_after_account_menu(monkeypatch) 
 
 
 def test_password_is_retained_after_post_auth_shell_error(monkeypatch) -> None:
-    client = HpcClient(settings)
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion"))
     monkeypatch.setattr(
         client,
         "health",
@@ -511,7 +856,7 @@ def test_command_markers_cannot_be_satisfied_by_terminal_echo(monkeypatch) -> No
         EOF = object()
         TIMEOUT = object()
 
-    client = HpcClient(settings)
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password"))
     child = FakeChild()
     client._child = child
     monkeypatch.setattr(client, "_connect_session_locked", lambda: None)
@@ -614,7 +959,7 @@ def test_menu_session_is_closed_before_any_remote_command(monkeypatch) -> None:
 
 
 def test_run_retries_once_only_when_command_was_not_dispatched(monkeypatch) -> None:
-    client = HpcClient(settings)
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password"))
     outcomes = iter([HpcSessionStaleError("stale"), "ready"])
     calls = []
     closes = []
@@ -641,6 +986,7 @@ def test_remote_gfs_manifest_requires_size_and_sha_match(monkeypatch) -> None:
     manifest = {
         "product": GFS_PRODUCT,
         "scope": GFS_SCOPE,
+        "bounds": [65.0, 5.0, 145.0, 60.0],
         "cycle": cycle,
         "files": [
             {
@@ -681,6 +1027,7 @@ def test_remote_gfs_manifest_complete_skips_missing_list(monkeypatch) -> None:
     manifest = {
         "product": GFS_PRODUCT,
         "scope": GFS_SCOPE,
+        "bounds": [65.0, 5.0, 145.0, 60.0],
         "cycle": cycle,
         "files": [
             {
@@ -732,6 +1079,8 @@ def test_wrf_script_checks_soil_layers_and_real_exit_status() -> None:
     assert "num_sm_layers" in script
     assert 'WRF_NUM_METGRID_SOIL_LEVELS="$met_st_levels"' in script
     assert "real_status=${PIPESTATUS[0]}" in script
+    assert 'mpirun -np "$mpi_processes" ./real.exe 2>&1 | tee real.log' in script
+    assert "if ./real.exe 2>&1 | tee real.log" not in script
     assert "configure_runtime_stack" in script
     assert "ulimit -S -s unlimited" in script
     assert 'OMP_STACKSIZE="${OMP_STACKSIZE:-512M}"' in script
@@ -744,6 +1093,8 @@ def test_wrf_script_checks_soil_layers_and_real_exit_status() -> None:
     assert 'if [ "$shown_grib" -eq 0 ]' in script
     assert "ls -lh *.grb* *.grib* *.nc" not in script
     assert "find -L . -maxdepth 1 -type f -name 'met_em.d01.*' -print -quit" in script
+    assert "adjust_output_times                 = .true." in script
+    assert "输出时次检查" in script
 
 
 def test_task_bundle_exports_complete_shell_runtime_without_remote_python(tmp_path) -> None:
@@ -768,6 +1119,9 @@ def test_task_bundle_exports_complete_shell_runtime_without_remote_python(tmp_pa
             "num_land_cat": 21, "radt": 5,
         },
         "assimilation_scheme": "fdda_standard",
+        "runtime_profile": "gpu",
+        "forecast_focus": "convection",
+        "spinup": {"mode": "custom", "hours": 24},
     }
     entries = [
         {
@@ -788,6 +1142,14 @@ def test_task_bundle_exports_complete_shell_runtime_without_remote_python(tmp_pa
     )
 
     environment = environment_path.read_text(encoding="utf-8")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["gfs_cache"]["gfs_file_interval_hours"] == 6
+    assert config["runtime_profile"] == "cpu"
+    assert config["time_range"]["spinup_hours"] == 6
+    assert config["time_range"]["model_start"] == "2026-07-16T18:00:00+00:00"
+    assert config["assimilation"]["end_hour"] == 6
+    assert "export WRF_REQUESTED_RUNTIME_PROFILE=cpu" in environment
+    assert "export WRF_ASSIM_SPINUP_HOURS=6" in environment
     assert "export WRF_DATA_SOURCE=gfs" in environment
     assert "export WRF_DX=27000" in environment
     assert "export WRF_DX_D01=27000" in environment
@@ -829,6 +1191,8 @@ def test_launch_writes_pid_and_log_into_remote_task_directory(monkeypatch) -> No
     assert f"cat {task_dir}/service.pid" in commands[1]
     assert "WRF_TASK_ENV=" in commands[1]
     assert "WRF_GFS_EXPECTED_INDEX=" in commands[1]
+    assert "WRF_GPU_SOURCE_DIR=" not in commands[1]
+    assert "WRF_GPU_MPI_PROCESSES=" not in commands[1]
     assert "pid=$!" not in commands[1]
 
 
@@ -909,6 +1273,8 @@ def test_pty_upload_reconnects_and_resumes_after_chunk_failure(monkeypatch) -> N
     source = Path(__file__).resolve().parents[1] / "scripts" / "wrf_hpc_gfs.sh"
     cfg = replace(
         settings,
+        hpc_connection_mode="bastion",
+        hpc_auth_mode="password",
         hpc_transfer_mode="pty",
         hpc_transfer_retries=2,
     )
@@ -941,7 +1307,7 @@ def test_auto_sftp_failure_falls_back_to_resumable_pty(monkeypatch) -> None:
     root.mkdir(parents=True)
     local_path = root / "gfs.test"
     local_path.write_bytes(b"GRIB-test")
-    client = HpcClient(replace(settings, hpc_transfer_mode="auto"))
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password", hpc_transfer_mode="auto"))
     calls = []
     progress = []
     progress_states = []
@@ -975,7 +1341,7 @@ def test_auto_sftp_failure_falls_back_to_resumable_pty(monkeypatch) -> None:
 
 
 def test_strict_sftp_failure_reports_failed_state(monkeypatch) -> None:
-    client = HpcClient(replace(settings, hpc_transfer_mode="sftp"))
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password", hpc_transfer_mode="sftp"))
     monkeypatch.setattr(
         client,
         "_upload_sftp",
@@ -1084,7 +1450,7 @@ def test_upload_does_not_swallow_cancellation_from_progress(monkeypatch) -> None
     class CancelSignal(RuntimeError):
         pass
 
-    client = HpcClient(replace(settings, hpc_transfer_mode="auto"))
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password", hpc_transfer_mode="auto"))
 
     def cancelled(_local, _remote, _timeout, progress):
         progress(1, 2)
@@ -1168,7 +1534,7 @@ def test_session_download_batches_remote_inventory(monkeypatch, tmp_path) -> Non
             f"FILE:wrfout_d01_b SIZE:{len(second)} SHA:{hashlib.sha256(second).hexdigest()}",
         ]
     )
-    client = HpcClient(settings)
+    client = HpcClient(replace(settings, hpc_connection_mode="bastion", hpc_auth_mode="password"))
     remote_queries = []
     downloads = []
     progress = []

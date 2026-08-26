@@ -11,3 +11,4 @@ data/WRF/runs/
 *.nc
 wrfout*
 wrfrst*
+tests/
