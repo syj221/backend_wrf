@@ -58,6 +58,7 @@ install_auth(
         ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2}),
         ("/api/wrf/data-status", {"GET": 1, "*": 2}),
         ("/api/wrf/gfs", {"GET": 1, "*": 2}),
+        ("/api/wrf/forcing", {"GET": 1, "*": 2}),
         ("/api/wrf/recommendations", {"GET": 1, "*": 2}),
         ("/api/wrf/options", {"GET": 1, "*": 2}),
         ("/api/wrf/hpc", 2),
@@ -132,6 +133,7 @@ def health() -> dict[str, Any]:
                 "min_free_gb": settings.hpc_gfs_min_free_gb,
                 "prefetch": task_manager.gfs_prefetch_status,
             },
+            "forcing": {"mode": "tx_lab_remote_pool", "data_sources": ["gfs", "ecmwf"]},
         }
     )
 
@@ -141,7 +143,7 @@ def options() -> dict[str, Any]:
     return ok(
         {
             "capabilities": {
-                "data_sources": ["GFS"],
+                "data_sources": ["GFS", "ECMWF"],
                 "execution_modes": ["TX_LAB"],
                 "max_domains": 4,
                 "scheduling_mode": "dynamic",
@@ -155,6 +157,11 @@ def options() -> dict[str, Any]:
                 "gfs_bounds": hpc_client.gfs_bounds,
                 "gfs_download_mode": "hpc_remote_nomads_grib_filter",
                 "gfs_storage_path": settings.hpc_gfs_dir,
+                "ecmwf_cycle_hours": [0],
+                "ecmwf_cycle_policy": "latest_covering_00z",
+                "ecmwf_product": "ecmwf-ifs-0p25",
+                "ecmwf_download_mode": "tx_lab_remote_full_file",
+                "ecmwf_storage_path": settings.hpc_ec_dir,
                 "gfs_storage_mount": settings.hpc_gfs_mount,
                 "gfs_min_free_gb": settings.hpc_gfs_min_free_gb,
                 "gfs_request_interval_seconds": settings.hpc_gfs_request_interval_seconds,
@@ -191,30 +198,86 @@ def options() -> dict[str, Any]:
 @app.get("/api/wrf/data-status")
 def data_status() -> dict[str, Any]:
     try:
-        target_cycles = gfs_manager.latest_cycles()
-        active_cycles = task_manager.active_gfs_cycles()
-        retained_cycles = task_manager.retained_gfs_cycles()
-        pool_items = hpc_client.gfs_pool_items(
-            target_cycles,
-            active_cycles | retained_cycles,
-        )
-        for item in pool_items:
-            for cycle in item.get("cycles") or []:
-                key = str(cycle.get("cycle") or "")
-                cycle["task_required"] = key in active_cycles
-                cycle["retained"] = key in retained_cycles
-                cycle["prefetch_target"] = key in target_cycles
+        pool_items: list[dict[str, Any]] = []
+        status_priority = {"error": 4, "downloading": 3, "partial": 2, "ready": 1, "idle": 0}
+        overall = "idle"
+        for source in ("gfs", "ecmwf"):
+            target_cycles = gfs_manager.latest_cycles(
+                count=settings.hpc_gfs_retained_cycles,
+                data_source=source,
+            )
+            active_cycles = task_manager.active_forcing_cycles(source)
+            retained_cycles = task_manager.retained_gfs_cycles() if source == "gfs" else set()
+            items = hpc_client.forcing_pool_items(
+                source,
+                target_cycles,
+                active_cycles | retained_cycles,
+            )
+            for item in items:
+                if status_priority.get(str(item.get("status")), 0) > status_priority.get(overall, 0):
+                    overall = str(item.get("status"))
+                for cycle in item.get("cycles") or []:
+                    key = str(cycle.get("cycle") or "")
+                    cycle["task_required"] = key in active_cycles
+                    cycle["retained"] = key in retained_cycles
+                    cycle["prefetch_target"] = key in target_cycles
+            pool_items.extend(items)
         return ok({
-            "status": pool_items[0].get("status", "idle"),
+            "status": overall,
             "mode": "tx_lab_remote_pool",
             "scope": "regional_subset",
             "bounds": hpc_client.gfs_bounds,
             "storage_path": settings.hpc_gfs_dir,
-            "target_cycles": target_cycles,
             "pool_items": pool_items,
         })
     except Exception as exc:
         return ok({"status": "unavailable", "mode": "tx_lab_remote_pool", "message": str(exc), "pool_items": []})
+
+
+@app.post("/api/wrf/forcing/{data_source}/sync-latest", status_code=202)
+def sync_latest_remote_forcing(data_source: str) -> dict[str, Any]:
+    source = gfs_manager.normalize_source(data_source)
+    if source == "gfs":
+        return sync_latest_remote_gfs()
+    try:
+        target_cycles = gfs_manager.latest_cycles(count=settings.hpc_gfs_retained_cycles, data_source=source)
+        pool = hpc_client.forcing_pool_items(source, target_cycles, task_manager.active_forcing_cycles(source))
+        actions: list[dict[str, Any]] = []
+        for item in pool:
+            for cycle in item.get("cycles") or []:
+                if cycle.get("target") and not cycle.get("complete"):
+                    actions.append(hpc_client.trigger_forcing_download(source, str(cycle["cycle"]), 72))
+        return ok({"data_source": source, "target_cycles": target_cycles, "actions": actions})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HpcError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/{data_source}/cleanup")
+def cleanup_remote_forcing(data_source: str, request: RemoteGfsCleanupRequest) -> dict[str, Any]:
+    source = gfs_manager.normalize_source(data_source)
+    target_cycles = gfs_manager.latest_cycles(count=settings.hpc_gfs_retained_cycles, data_source=source)
+    try:
+        result = hpc_client.cleanup_forcing_cycles(
+            source, request.paths, target_cycles, task_manager.active_forcing_cycles(source)
+        )
+        return ok(result, message=f"已清理确认的 tx-lab 旧 {source.upper()} 周期")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HpcError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/{data_source}/trigger", status_code=202)
+def trigger_remote_forcing(data_source: str, request: RemoteGfsTriggerRequest) -> dict[str, Any]:
+    source = gfs_manager.normalize_source(data_source)
+    try:
+        return ok(hpc_client.trigger_forcing_download(source, request.cycle, 72))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HpcError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @app.post("/api/wrf/gfs/sync-latest", status_code=202)

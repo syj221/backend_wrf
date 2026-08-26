@@ -15,6 +15,8 @@ FIXED_FORECAST_FOCUS = "general"
 def normalize_task_request(request: dict) -> dict:
     """Inject the current fixed execution policy into persisted task requests."""
     normalized = dict(request)
+    source = str(normalized.get("data_source") or "gfs").strip().lower()
+    normalized["data_source"] = "ecmwf" if source == "ec" else source
     normalized["runtime_profile"] = FIXED_RUNTIME_PROFILE
     normalized["spinup"] = {"mode": "custom", "hours": FIXED_SPINUP_HOURS}
     normalized["forecast_focus"] = FIXED_FORECAST_FOCUS
@@ -77,6 +79,7 @@ class PhysicsConfig(BaseModel):
 
 
 class WrfTaskCreate(BaseModel):
+    data_source: Literal["gfs", "ecmwf", "ec"] = "gfs"
     start_time: datetime
     end_time: datetime
     center: Center
@@ -87,6 +90,9 @@ class WrfTaskCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_request(self):
+        if self.data_source == "ec":
+            self.data_source = "ecmwf"
+        source_label = self.data_source.upper()
         start = self.start_time
         end = self.end_time
         if start.tzinfo is None:
@@ -104,11 +110,11 @@ class WrfTaskCreate(BaseModel):
         if (end - start).total_seconds() > 30 * 86400:
             raise ValueError("模拟时间跨度不能超过 30 天")
         if (end - start).total_seconds() < self.forecast_interval_hours * 3600:
-            raise ValueError("GFS 文件间隔不能大于模拟时长")
+            raise ValueError(f"{source_label} 文件间隔不能大于模拟时长")
         if any(value.minute or value.second or value.microsecond for value in (start, end)):
             raise ValueError("WRF 开始和结束时间必须为 UTC 整点")
         if start.hour % self.forecast_interval_hours or end.hour % self.forecast_interval_hours:
-            raise ValueError("开始和结束时刻必须与 GFS 文件间隔对齐")
+            raise ValueError(f"开始和结束时刻必须与 {source_label} 文件间隔对齐")
         if not 1 <= len(self.domains) <= 4:
             raise ValueError("嵌套域数量必须为 1-4")
         for index, domain in enumerate(self.domains, 1):
@@ -158,7 +164,7 @@ class WrfTaskCreate(BaseModel):
         model_start = start - timedelta(hours=FIXED_SPINUP_HOURS)
         cycle_start = model_start.replace(hour=0, minute=0, second=0, microsecond=0)
         if (end - cycle_start).total_seconds() / 3600 + 6 > 72:
-            raise ValueError("模拟窗口、spin-up 与 6 小时边界缓冲超出 GFS f000-f072")
+            raise ValueError(f"模拟窗口、spin-up 与 6 小时边界缓冲超出 {source_label} f000-f072")
         outer = self.domains[0]
         meters_per_degree = 111_320.0
         longitude_scale = meters_per_degree * max(0.1, math.cos(math.radians(self.center.lat)))
@@ -171,7 +177,7 @@ class WrfTaskCreate(BaseModel):
         north = self.center.lat + half_height + safety_margin
         if west < 65 or east > 145 or south < 5 or north > 60:
             raise ValueError(
-                "D01（含 1° 边界缓冲）超出中国区域 GFS 覆盖范围：65°E–145°E、5°N–60°N"
+                f"D01（含 1° 边界缓冲）超出中国区域 {source_label} 覆盖范围：65°E–145°E、5°N–60°N"
             )
         return self
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tx-lab + GFS 专用 CPU 入口。
+# tx-lab + GFS/ECMWF 专用 CPU 入口。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,19 +14,23 @@ source "${WRF_TASK_ENV}"
 export WRF_TASK_ENV_LOADED="true"
 export WRF_FAILURE_FILE="${WRF_FAILURE_FILE:-${WRF_TASK_ENV%/*}/failure.json}"
 
-if [[ "${WRF_DATA_SOURCE:-}" != "gfs" ]]; then
-    echo "[错误] tx-lab GFS 入口仅接受 WRF_DATA_SOURCE=gfs，当前为 ${WRF_DATA_SOURCE:-未设置}" >&2
+if [[ "${WRF_DATA_SOURCE:-}" != "gfs" && "${WRF_DATA_SOURCE:-}" != "ec" ]]; then
+    echo "[错误] tx-lab 入口仅接受 WRF_DATA_SOURCE=gfs/ec，当前为 ${WRF_DATA_SOURCE:-未设置}" >&2
     exit 2
 fi
-if [[ -z "${WRF_GFS_EXPECTED_INDEX:-}" || ! -s "${WRF_GFS_EXPECTED_INDEX}" ]]; then
+if [[ "${WRF_DATA_SOURCE:-}" == "gfs" && ( -z "${WRF_GFS_EXPECTED_INDEX:-}" || ! -s "${WRF_GFS_EXPECTED_INDEX}" ) ]]; then
     echo "[错误] 缺少 GFS 校验索引 WRF_GFS_EXPECTED_INDEX" >&2
+    exit 2
+fi
+if [[ "${WRF_DATA_SOURCE:-}" == "ec" && ( -z "${WRF_EC_EXPECTED_INDEX:-}" || ! -s "${WRF_EC_EXPECTED_INDEX}" ) ]]; then
+    echo "[错误] 缺少 ECMWF 校验索引 WRF_EC_EXPECTED_INDEX" >&2
     exit 2
 fi
 
 export WRF_RUNTIME="hpc"
-export WRF_DATA_SOURCE="gfs"
 export WRF_NONINTERACTIVE="true"
 export WRF_GFS_DATA_ROOT="${WRF_GFS_DATA_ROOT:-/mnt/wrf-data/WRF/GFS}"
+export WRF_EC_CACHE_ROOT="${WRF_EC_CACHE_ROOT:-/home/tx-lab/WRFwork/DATA/ECMWF_CHINA}"
 export WRF_RUNTIME_ENV="${WRF_RUNTIME_ENV:-/home/tx-lab/WRFwork/env_wrf_nvhpc.sh}"
 export WRF_CPU_SOURCE_DIR="${WRF_CPU_SOURCE_DIR:-/home/tx-lab/WRFwork/WRF_BUILD/WRF_CPU}"
 export WRF_REQUESTED_RUNTIME_PROFILE="cpu"

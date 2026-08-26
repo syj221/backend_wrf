@@ -331,13 +331,17 @@ class WrfTaskManager:
         return True
 
     @staticmethod
-    def new_task_id() -> str:
+    def new_task_id(data_source: str = "gfs") -> str:
+        source = str(data_source or "gfs").lower()
+        if source not in {"gfs", "ecmwf"}:
+            raise ValueError("数据源必须是 gfs 或 ecmwf")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return f"wrf_gfs_{stamp}_{uuid.uuid4().hex[:8]}"
+        return f"wrf_{source}_{stamp}_{uuid.uuid4().hex[:8]}"
 
     def submit(self, request: dict[str, Any], owner_sub: str = "") -> dict[str, Any]:
         request = normalize_task_request(request)
-        task_id = self.new_task_id()
+        data_source = str(request.get("data_source") or "gfs").lower()
+        task_id = self.new_task_id(data_source)
         task_dir = self.settings.run_dir / task_id
         (task_dir / "raw").mkdir(parents=True, exist_ok=False)
         (task_dir / "task.request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -350,7 +354,7 @@ class WrfTaskManager:
             fallback_used=False,
         )
         self._dispatch(task_id)
-        self._log(task_id, "任务已提交，开始动态并行调度")
+        self._log(task_id, f"{data_source.upper()} 任务已提交，开始动态并行调度")
         return task
 
     @staticmethod
@@ -406,15 +410,24 @@ class WrfTaskManager:
             task["attempts"] = self._attempt_summaries(task["id"])
         return [self._decorate_legacy_failure(task) for task in tasks]
 
-    def active_gfs_cycles(self) -> set[str]:
+    @staticmethod
+    def _forcing_cycle(runtime: dict[str, Any]) -> str | None:
+        return runtime.get("forcing_cycle") or runtime.get("gfs_cycle") or runtime.get("ecmwf_cycle")
+
+    def active_forcing_cycles(self, data_source: str) -> set[str]:
+        source = str(data_source or "gfs").lower()
         tasks = list(self.store.active())
         paused = getattr(self.store, "with_status", lambda *_args: [])("paused_external")
         tasks.extend(paused)
         return {
-            str((task.get("runtime") or {}).get("gfs_cycle"))
+            str(self._forcing_cycle(task.get("runtime") or {}))
             for task in tasks
-            if (task.get("runtime") or {}).get("gfs_cycle")
+            if str((task.get("request") or {}).get("data_source") or "gfs") == source
+            and self._forcing_cycle(task.get("runtime") or {})
         }
+
+    def active_gfs_cycles(self) -> set[str]:
+        return self.active_forcing_cycles("gfs")
 
     def retained_gfs_cycles(self) -> set[str]:
         if self.gfs is None:
@@ -823,25 +836,26 @@ class WrfTaskManager:
         if self._is_cancelled(task_id):
             raise TaskCancelledError("任务已取消")
 
-    def _cycle_lock(self, cycle: str) -> threading.Lock:
+    def _cycle_lock(self, cycle: str, data_source: str = "gfs") -> threading.Lock:
         with self._state_lock:
-            return self._cycle_locks.setdefault(cycle, threading.Lock())
+            return self._cycle_locks.setdefault(f"{data_source}:{cycle}", threading.Lock())
 
     @contextmanager
-    def _prepare_cycle(self, task_id: str, cycle: str):
-        lock = self._cycle_lock(cycle)
+    def _prepare_cycle(self, task_id: str, cycle: str, data_source: str = "gfs"):
+        label = data_source.upper()
+        lock = self._cycle_lock(cycle, data_source)
         if lock.locked():
-            self.store.update(task_id, stage="waiting_for_gfs_cache", progress=4)
-            self._log(task_id, f"等待其他任务完成 GFS {cycle} 缓存准备")
+            self.store.update(task_id, stage="waiting_for_forcing_cache", progress=4)
+            self._log(task_id, f"等待其他任务完成 {label} {cycle} 缓存准备")
         while not lock.acquire(timeout=0.5):
             if self._is_cancelled(task_id):
-                raise TaskCancelledError("等待 GFS 缓存期间任务已取消")
+                raise TaskCancelledError(f"等待 {label} 缓存期间任务已取消")
             if self._stop.is_set():
-                raise RuntimeError("等待 GFS 缓存期间服务正在停止")
+                raise RuntimeError(f"等待 {label} 缓存期间服务正在停止")
         try:
             self._raise_if_cancelled(task_id)
             if self._stop.is_set():
-                raise RuntimeError("GFS 缓存准备开始前服务正在停止")
+                raise RuntimeError(f"{label} 缓存准备开始前服务正在停止")
             yield
         finally:
             lock.release()
@@ -1179,6 +1193,8 @@ class WrfTaskManager:
             fallback_used=False,
             fallback_reason=None,
         )
+        data_source = str(request.get("data_source") or "gfs").lower()
+        source_label = data_source.upper()
         start = datetime.fromisoformat(request["start_time"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(request["end_time"].replace("Z", "+00:00"))
         spinup_hours = resolve_spinup_hours(request)
@@ -1191,40 +1207,47 @@ class WrfTaskManager:
             failure=None,
             error=None,
         )
-        self._log(task_id, f"产品起报前增加 {spinup_hours} 小时 spin-up；按固定 00Z 策略选择 GFS cycle")
+        self._log(task_id, f"产品起报前增加 {spinup_hours} 小时 spin-up；按固定 00Z 策略选择 {source_label} cycle")
         self._raise_if_cancelled(task_id)
-        cycle, _ = self.gfs.select_cycle(model_start, end)
+        cycle, _ = self.gfs.select_cycle(model_start, end, data_source=data_source)
         self._raise_if_cancelled(task_id)
         interval = int(request.get("forecast_interval_hours") or 1)
-        hours = self.gfs.required_hours(model_start, end, interval, cycle)
+        hours = self.gfs.required_hours(model_start, end, interval, cycle, data_source=data_source)
         self._merge_runtime(
             task_id,
+            data_source=data_source,
+            forcing_cycle=cycle,
+            **{f"{data_source}_cycle": cycle},
             gfs_cycle=cycle,
             forecast_hours=hours,
             spinup_hours=spinup_hours,
             model_start_time=model_start.isoformat().replace("+00:00", "Z"),
         )
 
-        with self._prepare_cycle(task_id, cycle):
-            self.store.update(task_id, stage="checking_hpc_gfs", progress=4)
-            self._log(task_id, f"检查 tx-lab GFS 数据池：{cycle}，任务间隔 {interval} 小时，共 {len(hours)} 个时次")
+        with self._prepare_cycle(task_id, cycle, data_source):
+            self.store.update(task_id, stage="checking_hpc_forcing", progress=4)
+            self._log(task_id, f"检查 tx-lab {source_label} 数据池：{cycle}，任务间隔 {interval} 小时，共 {len(hours)} 个时次")
             last_ready = -1
             logged_cleanup_paths: set[str] = set()
 
-            def remote_gfs_progress(snapshot: dict[str, Any]) -> None:
+            def remote_forcing_progress(snapshot: dict[str, Any]) -> None:
                 nonlocal last_ready
                 deleted_paths = set((snapshot.get("auto_cleanup") or {}).get("deleted") or [])
                 new_cleanup_paths = sorted(deleted_paths - logged_cleanup_paths)
                 if new_cleanup_paths:
                     logged_cleanup_paths.update(new_cleanup_paths)
-                    self._log(task_id, f"已自动清理旧 GFS 周期：{', '.join(new_cleanup_paths)}")
+                    self._log(task_id, f"已自动清理旧 {source_label} 周期：{', '.join(new_cleanup_paths)}")
                 ready = len(snapshot.get("valid_hours") or [])
                 download = snapshot.get("download") or {}
                 if ready != last_ready:
                     last_ready = ready
-                    self._log(task_id, f"等待 tx-lab 共享下载：{ready}/{len(hours)} 个任务时次已就绪")
+                    self._log(task_id, f"等待 tx-lab 共享 {source_label} 下载：{ready}/{len(hours)} 个任务时次已就绪")
                 self._merge_runtime(
                     task_id,
+                    forcing_remote_reused=ready,
+                    forcing_remote_missing=len(snapshot.get("missing_hours") or []),
+                    forcing_total=len(hours),
+                    forcing_download_owner="hpc_shared_pool",
                     gfs_remote_reused=ready,
                     gfs_remote_missing=len(snapshot.get("missing_hours") or []),
                     gfs_total=len(hours),
@@ -1235,32 +1258,37 @@ class WrfTaskManager:
                 self.store.update(
                     task_id,
                     progress=5 + int(55 * ready / max(1, len(hours))),
-                    stage="waiting_for_hpc_gfs",
+                    stage="waiting_for_hpc_forcing",
                 )
 
-            ensure_remote = getattr(self.hpc, "ensure_remote_gfs", None)
+            ensure_remote = getattr(self.hpc, "ensure_remote_forcing", None)
             if ensure_remote:
                 remote_cache = ensure_remote(
+                    data_source,
                     cycle,
                     hours,
-                    progress=remote_gfs_progress,
+                    progress=remote_forcing_progress,
                     cancelled=lambda: self._is_cancelled(task_id) or self._stop.is_set(),
-                    protected_cycles=self.protected_gfs_cycles(),
+                    protected_cycles=self.protected_gfs_cycles() if data_source == "gfs" else self.active_forcing_cycles(data_source),
                 )
             else:
                 remote_cache = self.hpc.inspect_gfs_files(cycle, hours)
                 if remote_cache.get("missing_hours"):
-                    raise RuntimeError("tx-lab GFS 数据池不完整，且连接客户端不支持远端共享下载")
+                    raise RuntimeError(f"tx-lab {source_label} 数据池不完整，且连接客户端不支持远端共享下载")
             verified_entries = list(remote_cache.get("entries") or [])
             self._merge_runtime(
                 task_id,
+                forcing_remote_reused=len(remote_cache.get("valid_hours") or []),
+                forcing_remote_missing=0,
+                forcing_total=len(hours),
+                forcing_download_owner="hpc_shared_pool",
                 gfs_remote_reused=len(remote_cache.get("valid_hours") or []),
                 gfs_remote_missing=0,
                 gfs_total=len(hours),
                 gfs_download_owner="hpc_shared_pool",
             )
-            self._log(task_id, "tx-lab 完整 GFS 文件校验通过，任务将直接复用共享数据池")
-            self.store.update(task_id, progress=65, stage="remote_gfs_ready")
+            self._log(task_id, f"tx-lab 完整 {source_label} 文件校验通过，任务将直接复用共享数据池")
+            self.store.update(task_id, progress=65, stage="remote_forcing_ready")
             self._raise_if_cancelled(task_id)
 
         last_transfer_status: tuple[str, str] | None = None
@@ -1281,7 +1309,7 @@ class WrfTaskManager:
         run_dir = self.settings.run_dir / task_id
         config_path = run_dir / "task.config.json"
         environment_path = run_dir / "task.env"
-        expected_gfs_path = run_dir / "gfs.expected.tsv"
+        expected_forcing_path = run_dir / "forcing.expected.tsv"
         write_task_bundle(
             task_id,
             request,
@@ -1290,7 +1318,7 @@ class WrfTaskManager:
             verified_entries,
             config_path,
             environment_path,
-            expected_gfs_path,
+            expected_forcing_path,
         )
         self.store.update(task_id, status="uploading", stage="preparing_hpc", progress=66)
         self._log(task_id, "上传任务配置与 WRF 运行脚本")
@@ -1310,7 +1338,7 @@ class WrfTaskManager:
                 task_id,
                 config_path,
                 environment_path,
-                expected_gfs_path,
+                expected_forcing_path,
                 Path(__file__).resolve().parent / "scripts",
                 progress=prepare_progress,
             )
@@ -1320,7 +1348,7 @@ class WrfTaskManager:
         self._raise_if_cancelled(task_id)
         self.store.update(task_id, status="running", stage="running", progress=68)
         self._merge_runtime(task_id, remote_launch_attempted=True)
-        launch = self.hpc.launch(task_id)
+        launch = self.hpc.launch(task_id, data_source) if hasattr(self.hpc, "inspect_forcing_files") else self.hpc.launch(task_id)
         self._merge_runtime(task_id, **launch)
         self._log(task_id, f"tx-lab 任务已启动，PID {launch['remote_pid']}")
         if self._is_cancelled(task_id):

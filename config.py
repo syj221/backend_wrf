@@ -4,8 +4,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -72,6 +75,23 @@ class Settings:
     hpc_gfs_full_min_bytes: int = max(
         64 * 1024,
         int(os.getenv("WRF_HPC_GFS_FULL_MIN_BYTES", str(1024 * 1024))),
+    )
+    hpc_ec_dir: str = os.getenv(
+        "WRF_HPC_EC_DIR", "/home/tx-lab/WRFwork/DATA/ECMWF_CHINA"
+    ).strip().rstrip("/")
+    hpc_ec_download_script: str = os.getenv(
+        "WRF_HPC_EC_DOWNLOAD_SCRIPT",
+        "/home/tx-lab/WRFwork/RUNTIME/backend_wrf_service/download_ecmwf_00z.sh",
+    ).strip()
+    hpc_ec_wait_seconds: int = max(
+        60, int(os.getenv("WRF_HPC_EC_WAIT_SECONDS", str(hpc_gfs_wait_seconds)))
+    )
+    hpc_ec_poll_seconds: int = max(
+        5, int(os.getenv("WRF_HPC_EC_POLL_SECONDS", str(hpc_gfs_poll_seconds)))
+    )
+    hpc_ec_full_min_bytes: int = max(
+        64 * 1024,
+        int(os.getenv("WRF_HPC_EC_FULL_MIN_BYTES", str(1024 * 1024))),
     )
     hpc_wps_source_dir: str = os.getenv(
         "WRF_HPC_WPS_SOURCE_DIR", "/home/tx-lab/WRFwork/WPS/WPS-4.6.0-nvhpc"

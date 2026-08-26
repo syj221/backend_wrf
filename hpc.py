@@ -16,9 +16,10 @@ from config import Settings
 from schemas import FIXED_RUNTIME_PROFILE, FIXED_SPINUP_HOURS, normalize_task_request
 
 
-SAFE_TASK_ID = re.compile(r"^wrf_(?:gfs_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
+SAFE_TASK_ID = re.compile(r"^wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[A-Za-z0-9_./-]*$")
 SAFE_GFS_NAME = re.compile(r"^gfs\.t(?P<cycle_hour>[0-9]{2})z\.pgrb2\.0p25\.f(?P<forecast_hour>[0-9]{3})$")
+SAFE_EC_NAME = re.compile(r"^ecmwf\.t(?P<cycle_hour>[0-9]{2})z\.ifs\.0p25\.f(?P<forecast_hour>[0-9]{3})\.grib2$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -472,6 +473,11 @@ from hpc_transport import HpcAuthError, HpcClient, HpcError  # noqa: E402,F401
 
 def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: list[int]) -> dict[str, Any]:
     request = normalize_task_request(request)
+    data_source = str(request.get("data_source") or "gfs").lower()
+    if data_source not in {"gfs", "ecmwf"}:
+        raise ValueError("数据源必须是 gfs 或 ecmwf")
+    cache_key = "gfs_cache" if data_source == "gfs" else "ec_cache"
+    cache_prefix = "gfs" if data_source == "gfs" else "ec"
     start = request["start_time"]
     end = request["end_time"]
     if isinstance(start, str):
@@ -491,7 +497,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
     return {
         "task_id": task_id,
         "display_id": task_id,
-        "data_source": "gfs",
+        "data_source": data_source,
         "runtime_profile": FIXED_RUNTIME_PROFILE,
         "time_range": {
             "start_year": model_start.year, "start_month": model_start.month, "start_day": model_start.day, "start_hour": model_start.hour,
@@ -511,13 +517,13 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
             "coarse_min_dx": 9000,
             "ramp_minutes": 60,
         },
-        "gfs_cache": {
+        cache_key: {
             "mode": "global_cycle_fhour",
-            "gfs_cycle_date": cycle[:8],
-            "gfs_cycle_hour": cycle[8:10],
-            "gfs_forecast_hours": hours,
-            "gfs_required_forecast_hours": hours,
-            "gfs_file_interval_hours": int(request.get("forecast_interval_hours") or 1),
+            f"{cache_prefix}_cycle_date": cycle[:8],
+            f"{cache_prefix}_cycle_hour": cycle[8:10],
+            f"{cache_prefix}_forecast_hours": hours,
+            f"{cache_prefix}_required_forecast_hours": hours,
+            f"{cache_prefix}_file_interval_hours": int(request.get("forecast_interval_hours") or 1),
         },
         "output": {"task_tag": task_id},
     }
@@ -534,12 +540,15 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
     time_range = config["time_range"]
     center = config["center"]
     physics = config["physics"]
-    gfs = config["gfs_cache"]
+    data_source = str(config.get("data_source") or "gfs")
+    cache_key = "gfs_cache" if data_source == "gfs" else "ec_cache"
+    cache_prefix = "gfs" if data_source == "gfs" else "ec"
+    forcing = config[cache_key]
     assimilation = config["assimilation"]
     environment: dict[str, Any] = {
         "WRF_TASK_TAG": config["output"]["task_tag"],
         "WRF_REQUESTED_RUNTIME_PROFILE": config.get("runtime_profile", "cpu"),
-        "WRF_DATA_SOURCE": "gfs",
+        "WRF_DATA_SOURCE": "gfs" if data_source == "gfs" else "ec",
         "WRF_NONINTERACTIVE": "true",
         "WRF_MAX_DOM": config["max_dom"],
         "WRF_START_YEAR": time_range["start_year"],
@@ -552,18 +561,21 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
         "WRF_END_HOUR": f"{int(time_range['end_hour']):02d}",
         "WRF_REF_LAT": center["lat"],
         "WRF_REF_LON": center["lon"],
-        "WRF_GFS_DATE": gfs["gfs_cycle_date"],
-        "WRF_GFS_HOUR": f"{int(gfs['gfs_cycle_hour']):02d}",
-        "WRF_GFS_FORECAST_HOURS": " ".join(
-            f"{int(hour):03d}" for hour in gfs["gfs_forecast_hours"]
-        ),
-        "WRF_GFS_CACHE_MODE": gfs["mode"],
-        "WRF_GFS_FILE_INTERVAL_HOURS": gfs["gfs_file_interval_hours"],
-        "WRF_FORECAST_FILE_INTERVAL_HOURS": gfs["gfs_file_interval_hours"],
+        "WRF_FORECAST_FILE_INTERVAL_HOURS": forcing[f"{cache_prefix}_file_interval_hours"],
         "WRF_ASSIMILATION_SCHEME": assimilation["scheme"],
         "WRF_ASSIM_SPINUP_HOURS": time_range.get("spinup_hours", 0),
         "WRF_HISTORY_BEGIN_MINUTES": int(time_range.get("spinup_hours", 0)) * 60,
     }
+    variable_prefix = "WRF_GFS" if data_source == "gfs" else "WRF_EC"
+    environment[f"{variable_prefix}_DATE"] = forcing[f"{cache_prefix}_cycle_date"]
+    environment[f"{variable_prefix}_HOUR"] = f"{int(forcing[f'{cache_prefix}_cycle_hour']):02d}"
+    environment[f"{variable_prefix}_FORECAST_HOURS"] = " ".join(
+        f"{int(hour):03d}" for hour in forcing[f"{cache_prefix}_forecast_hours"]
+    )
+    environment[f"{variable_prefix}_CACHE_MODE"] = forcing["mode"]
+    environment[f"{variable_prefix}_FILE_INTERVAL_HOURS"] = forcing[
+        f"{cache_prefix}_file_interval_hours"
+    ]
     physics_mapping = {
         "num_metgrid_levels": "WRF_NUM_METGRID_LEVELS",
         "mp_physics": "WRF_MP_PHYSICS",
@@ -619,7 +631,8 @@ def _write_runtime_environment(config: dict[str, Any], path: Path) -> None:
     path.chmod(0o600)
 
 
-def _write_expected_gfs_index(
+def _write_expected_forcing_index(
+    data_source: str,
     cycle: str,
     hours: list[int],
     entries: list[dict[str, Any]],
@@ -629,7 +642,8 @@ def _write_expected_gfs_index(
     by_hour: dict[int, tuple[str, int, str]] = {}
     for item in entries:
         name = str(item.get("name") or "")
-        match = SAFE_GFS_NAME.fullmatch(name)
+        matcher = SAFE_GFS_NAME if data_source == "gfs" else SAFE_EC_NAME
+        match = matcher.fullmatch(name)
         digest = str(item.get("sha256") or "").lower()
         try:
             forecast_hour = int(item.get("forecast_hour"))
@@ -647,7 +661,7 @@ def _write_expected_gfs_index(
         by_hour[forecast_hour] = (name, size, digest)
     missing = [hour for hour in requested if hour not in by_hour]
     if missing:
-        raise HpcError(f"缺少已验证的远端 GFS 索引：{missing}")
+        raise HpcError(f"缺少已验证的远端 {data_source.upper()} 索引：{missing}")
     lines = [
         f"{by_hour[hour][0]}\t{by_hour[hour][1]}\t{by_hour[hour][2]}\t{hour:03d}"
         for hour in requested
@@ -665,8 +679,10 @@ def write_task_bundle(
     entries: list[dict[str, Any]],
     config_path: Path,
     environment_path: Path,
-    expected_gfs_path: Path,
+    expected_forcing_path: Path,
 ) -> None:
     config = write_task_config(task_id, request, cycle, hours, config_path)
     _write_runtime_environment(config, environment_path)
-    _write_expected_gfs_index(cycle, hours, entries, expected_gfs_path)
+    _write_expected_forcing_index(
+        str(request.get("data_source") or "gfs"), cycle, hours, entries, expected_forcing_path
+    )
