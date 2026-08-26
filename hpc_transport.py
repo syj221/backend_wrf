@@ -50,6 +50,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _safe_local_output_name(name: str) -> str:
+    """Return a wrfout file name that is safe on both Linux and Windows."""
+    return name.replace(":", "-")
+
+
 class HpcError(RuntimeError):
     pass
 
@@ -1127,7 +1132,7 @@ class HpcClient:
 
             self._download_file_session(
                 f"{remote_dir}/{name}",
-                local_dir / name,
+                local_dir / _safe_local_output_name(name),
                 timeout,
                 expected_meta=(size, digest),
                 progress=file_progress,

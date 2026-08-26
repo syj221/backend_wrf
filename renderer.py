@@ -118,10 +118,11 @@ def validate_wrfout_files(raw_dir: Path) -> dict[str, Any]:
 
 
 def _filename_time(name: str) -> tuple[str, str]:
-    match = re.search(r"wrfout_(d\d{2})_(\d{4}-\d{2}-\d{2})_(\d{2}:\d{2}:\d{2})", name)
+    match = re.search(r"wrfout_(d\d{2})_(\d{4}-\d{2}-\d{2})_(\d{2}[:-]\d{2}[:-]\d{2})", name)
     if not match:
         return "", ""
-    return match.group(1).lower(), f"{match.group(2)}T{match.group(3)}Z"
+    time_text = match.group(3).replace("-", ":")
+    return match.group(1).lower(), f"{match.group(2)}T{time_text}Z"
 
 
 def _parse_utc(value: str) -> datetime | None:

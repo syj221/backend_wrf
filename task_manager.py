@@ -1085,7 +1085,12 @@ class WrfTaskManager:
                 include_names=valid_names,
             )
         else:
-            self.hpc.download_outputs(task_id, raw_dir, progress=download_progress)
+            self.hpc.download_outputs(
+                task_id,
+                raw_dir,
+                progress=download_progress,
+                include_names=valid_names or None,
+            )
         self._raise_if_cancelled(task_id)
         self.store.update(task_id, stage="rendering", progress=94)
         output_dir = self.settings.output_dir / "runs" / task_id
@@ -1217,7 +1222,7 @@ class WrfTaskManager:
             task_id,
             data_source=data_source,
             forcing_cycle=cycle,
-            **{f"{data_source}_cycle": cycle},
+            **({f"{data_source}_cycle": cycle} if data_source != "gfs" else {}),
             gfs_cycle=cycle,
             forecast_hours=hours,
             spinup_hours=spinup_hours,
