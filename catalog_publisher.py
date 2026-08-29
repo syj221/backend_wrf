@@ -193,25 +193,34 @@ def publish_workbench_result(
     target = data_root / "WRF" / "workbench" / task_id
     published_manifest = _rewrite_manifest_urls(manifest, task_id)
     payload = _manifest_bytes(published_manifest)
-    if target.exists():
-        existing_meta = target / "scene.meta.json"
-        if not existing_meta.is_file() or existing_meta.read_bytes() != payload:
-            raise RuntimeError(f"WRF 统一目录已存在冲突结果：{target}")
-    else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.parent / f".{task_id}.publishing"
+    created_target = False
+    staging = target.parent / f".{task_id}.publishing"
+    try:
+        if target.exists():
+            existing_meta = target / "scene.meta.json"
+            if not existing_meta.is_file() or existing_meta.read_bytes() != payload:
+                raise RuntimeError(f"WRF 统一目录已存在冲突结果：{target}")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if staging.exists():
+                shutil.rmtree(staging)
+            shutil.copytree(source_dir, staging)
+            temporary_meta = staging / "scene.meta.json.part"
+            temporary_meta.write_bytes(payload)
+            temporary_meta.replace(staging / "scene.meta.json")
+            staging.replace(target)
+            created_target = True
+        catalog = _register_catalog(task_id, owner_sub, published_manifest, target / "scene.meta.json", data_root)
+        return {
+            "status": "success",
+            "source_origin": "workbench",
+            "source_task_id": task_id,
+            "meta_url": f"/data/WRF/workbench/{task_id}/scene.meta.json",
+            **catalog,
+        }
+    except Exception:
         if staging.exists():
-            shutil.rmtree(staging)
-        shutil.copytree(source_dir, staging)
-        temporary_meta = staging / "scene.meta.json.part"
-        temporary_meta.write_bytes(payload)
-        temporary_meta.replace(staging / "scene.meta.json")
-        staging.replace(target)
-    catalog = _register_catalog(task_id, owner_sub, published_manifest, target / "scene.meta.json", data_root)
-    return {
-        "status": "success",
-        "source_origin": "workbench",
-        "source_task_id": task_id,
-        "meta_url": f"/data/WRF/workbench/{task_id}/scene.meta.json",
-        **catalog,
-    }
+            shutil.rmtree(staging, ignore_errors=True)
+        if created_target:
+            shutil.rmtree(target, ignore_errors=True)
+        raise
