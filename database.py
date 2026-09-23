@@ -46,6 +46,11 @@ class TaskStore:
                 """
             )
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(wrf_tasks)").fetchall()}
+            self._db.execute("""CREATE TABLE IF NOT EXISTS wrf_submissions (
+                owner_sub TEXT NOT NULL, submission_key TEXT NOT NULL,
+                request_json TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(owner_sub, submission_key))""")
             if "owner_sub" not in columns:
                 self._db.execute("ALTER TABLE wrf_tasks ADD COLUMN owner_sub TEXT NOT NULL DEFAULT ''")
             if "failure_json" not in columns:
@@ -77,6 +82,21 @@ class TaskStore:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def reserve_submission(self, owner: str, key: str, request: dict, task_id: str) -> dict:
+        canonical = json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        with self._lock, self._db:
+            self._db.execute("INSERT OR IGNORE INTO wrf_submissions VALUES (?,?,?,?,0)",
+                             (owner, key, canonical, task_id))
+            row = self._db.execute("SELECT * FROM wrf_submissions WHERE owner_sub=? AND submission_key=?",
+                                   (owner, key)).fetchone()
+            if row["request_json"] != canonical:
+                raise ValueError("同一幂等键不能提交不同配置")
+            return dict(row)
+
+    def accept_submission(self, owner: str, key: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE wrf_submissions SET accepted=1 WHERE owner_sub=? AND submission_key=?", (owner, key))
 
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict[str, Any] | None:

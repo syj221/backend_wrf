@@ -11,6 +11,12 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 
+DEFAULT_HPC_STORAGE_UUID = "7EEE64E3EE6494E5"
+DEFAULT_HPC_STORAGE_ALIAS = "/home/tx-lab/.wrf-data"
+HPC_STORAGE_UUID = os.getenv("WRF_HPC_STORAGE_UUID", DEFAULT_HPC_STORAGE_UUID).strip().upper()
+HPC_STORAGE_ALIAS = os.getenv("WRF_HPC_STORAGE_ALIAS", DEFAULT_HPC_STORAGE_ALIAS).strip().rstrip("/")
+
+
 def _flag(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -25,6 +31,33 @@ class Settings:
     data_dir: Path = Path(os.getenv("WRF_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
     run_dir: Path = Path(os.getenv("WRF_RUN_DATA_DIR", BASE_DIR / "data" / "runs")).expanduser().resolve()
     database_path: Path = Path(os.getenv("WRF_DATABASE_PATH", BASE_DIR / "data" / "wrf_tasks.sqlite3")).expanduser().resolve()
+    downscale_database_path: Path = Path(
+        os.getenv("WRF_DOWNSCALE_DATABASE_PATH", BASE_DIR / "data" / "downscale_tasks.sqlite3")
+    ).expanduser().resolve()
+    downscale_terrain_catalog_path: Path = Path(
+        os.getenv("WRF_DOWNSCALE_TERRAIN_CATALOG", BASE_DIR / "data" / "downscale_terrain_assets.json")
+    ).expanduser().resolve()
+    terrain_artifact_base_url: str = os.getenv("TERRAIN_ARTIFACT_BASE_URL", "http://127.0.0.1:8003").strip().rstrip("/")
+    terrain_artifact_service_token: str = os.getenv("TERRAIN_ARTIFACT_SERVICE_TOKEN", "").strip()
+    downscale_confirmation_secret: str = os.getenv(
+        "WRF_DOWNSCALE_CONFIRMATION_SECRET", os.getenv("JWT_SECRET", "dev-downscale-confirmation-secret")
+    )
+    downscale_confirmation_ttl_seconds: int = max(
+        60, min(3600, int(os.getenv("WRF_DOWNSCALE_CONFIRMATION_TTL_SECONDS", "600")))
+    )
+    downscale_available_memory_gib: float = max(
+        1.0, float(os.getenv("WRF_DOWNSCALE_AVAILABLE_MEMORY_GIB", "128"))
+    )
+    downscale_available_disk_gib: float = max(
+        100.0, float(os.getenv("WRF_DOWNSCALE_AVAILABLE_DISK_GIB", "208"))
+    )
+    downscale_native_retention_days: int = max(
+        1, min(3650, int(os.getenv("WRF_DOWNSCALE_NATIVE_RETENTION_DAYS", "90")))
+    )
+    downscale_runner_enabled: bool = _flag("WRF_DOWNSCALE_RUNNER_ENABLED", True)
+    downscale_runner_poll_seconds: int = max(
+        2, min(300, int(os.getenv("WRF_DOWNSCALE_RUNNER_POLL_SECONDS", "10")))
+    )
     catalog_publish_enabled: bool = _flag("WRF_CATALOG_PUBLISH_ENABLED", True)
     catalog_data_root: Path = Path(
         os.getenv("WRF_CATALOG_DATA_ROOT", BASE_DIR.parent / "backend_system" / "data")
@@ -32,17 +65,18 @@ class Settings:
     hpc_host: str = os.getenv("WRF_HPC_HOST", "10.255.248.88").strip()
     hpc_port: int = max(1, min(65535, int(os.getenv("WRF_HPC_PORT", "1301"))))
     hpc_user: str = os.getenv("WRF_HPC_USER", "tx-lab").strip()
+    hpc_storage_uuid: str = HPC_STORAGE_UUID
+    hpc_storage_alias: str = HPC_STORAGE_ALIAS
     hpc_remote_dir: str = os.getenv(
-        "WRF_HPC_REMOTE_DIR", "/home/tx-lab/WRFwork/RUNTIME"
+        "WRF_HPC_REMOTE_DIR", f"{HPC_STORAGE_ALIAS}/WRFwork/RUNTIME"
     ).strip().rstrip("/")
     hpc_gfs_dir: str = os.getenv(
-        "WRF_HPC_GFS_DIR", "/home/tx-lab/WRFwork/DATA/GFS_CHINA"
+        "WRF_HPC_GFS_DIR", f"{HPC_STORAGE_ALIAS}/WRFwork/DATA/GFS"
     ).strip().rstrip("/")
     hpc_gfs_download_script: str = os.getenv(
         "WRF_HPC_GFS_DOWNLOAD_SCRIPT",
-        "/home/tx-lab/WRFwork/RUNTIME/backend_wrf_service/download_gfs_00z.sh",
+        f"{HPC_STORAGE_ALIAS}/WRFwork/RUNTIME/backend_wrf_service/download_gfs_00z.sh",
     ).strip()
-    hpc_gfs_wait_seconds: int = max(60, int(os.getenv("WRF_HPC_GFS_WAIT_SECONDS", "5400")))
     hpc_gfs_poll_seconds: int = max(5, int(os.getenv("WRF_HPC_GFS_POLL_SECONDS", "30")))
     hpc_gfs_download_workers: int = max(
         1, min(8, int(os.getenv("WRF_HPC_GFS_DOWNLOAD_WORKERS", "1")))
@@ -50,15 +84,24 @@ class Settings:
     hpc_gfs_mirror_probe_seconds: int = max(
         3, min(30, int(os.getenv("WRF_HPC_GFS_MIRROR_PROBE_SECONDS", "12")))
     )
-    hpc_gfs_publication_lag_hours: int = max(
-        0, min(24, int(os.getenv("WRF_HPC_GFS_PUBLICATION_LAG_HOURS", "8")))
-    )
     hpc_gfs_prefetch_enabled: bool = _flag("WRF_HPC_GFS_PREFETCH_ENABLED", True)
     hpc_gfs_prefetch_interval_seconds: int = max(
         60, int(os.getenv("WRF_HPC_GFS_PREFETCH_INTERVAL_SECONDS", "300"))
     )
     hpc_gfs_prefetch_start_delay_seconds: int = max(
         0, int(os.getenv("WRF_HPC_GFS_PREFETCH_START_DELAY_SECONDS", "15"))
+    )
+    hpc_pool_publish_probe_seconds: int = max(
+        60, int(os.getenv("WRF_POOL_PUBLISH_PROBE_SECONDS", "300"))
+    )
+    hpc_pool_retry_max_attempts: int = max(
+        1, min(32, int(os.getenv("WRF_POOL_RETRY_MAX_ATTEMPTS", "8")))
+    )
+    hpc_pool_retry_max_seconds: int = max(
+        60, min(3600, int(os.getenv("WRF_POOL_RETRY_MAX_SECONDS", "900")))
+    )
+    hpc_pool_history_retention_days: int = max(
+        1, min(3650, int(os.getenv("WRF_POOL_HISTORY_RETENTION_DAYS", "30")))
     )
     hpc_gfs_retained_cycles: int = max(
         1, min(14, int(os.getenv("WRF_HPC_GFS_RETAINED_CYCLES", "2")))
@@ -81,15 +124,12 @@ class Settings:
         int(os.getenv("WRF_HPC_GFS_FULL_MIN_BYTES", str(1024 * 1024))),
     )
     hpc_ec_dir: str = os.getenv(
-        "WRF_HPC_EC_DIR", "/home/tx-lab/WRFwork/DATA/ECMWF_CHINA"
+        "WRF_HPC_EC_DIR", f"{HPC_STORAGE_ALIAS}/WRFwork/DATA/ECMWF"
     ).strip().rstrip("/")
     hpc_ec_download_script: str = os.getenv(
         "WRF_HPC_EC_DOWNLOAD_SCRIPT",
-        "/home/tx-lab/WRFwork/RUNTIME/backend_wrf_service/download_ecmwf_00z.sh",
+        f"{HPC_STORAGE_ALIAS}/WRFwork/RUNTIME/backend_wrf_service/download_ecmwf_00z.sh",
     ).strip()
-    hpc_ec_wait_seconds: int = max(
-        60, int(os.getenv("WRF_HPC_EC_WAIT_SECONDS", str(hpc_gfs_wait_seconds)))
-    )
     hpc_ec_poll_seconds: int = max(
         5, int(os.getenv("WRF_HPC_EC_POLL_SECONDS", str(hpc_gfs_poll_seconds)))
     )
@@ -112,7 +152,21 @@ class Settings:
     hpc_runtime_env: str = os.getenv(
         "WRF_HPC_RUNTIME_ENV", "/home/tx-lab/WRFwork/env_wrf_nvhpc.sh"
     ).strip()
-    hpc_gfs_mount: str = os.getenv("WRF_HPC_GFS_MOUNT", "/").strip().rstrip("/") or "/"
+    hpc_downscale_interface_root: str = os.getenv(
+        "WRF_HPC_DOWNSCALE_INTERFACE_ROOT", "/home/tx-lab/WRFwork/CFD/interface"
+    ).strip().rstrip("/")
+    hpc_downscale_cfd_template: str = os.getenv(
+        "WRF_HPC_DOWNSCALE_CFD_TEMPLATE", "/home/tx-lab/WRFwork/CFD/templates/thermal-rans-graded-v2"
+    ).strip().rstrip("/")
+    hpc_downscale_openfoam_activate: str = os.getenv(
+        "WRF_HPC_DOWNSCALE_OPENFOAM_ACTIVATE", "/home/tx-lab/WRFwork/CFD/activate.sh"
+    ).strip()
+    hpc_downscale_python: str = os.getenv(
+        "WRF_HPC_DOWNSCALE_PYTHON", "/home/tx-lab/WRFwork/ENV/wrfpost/bin/python"
+    ).strip()
+    hpc_gfs_mount: str = os.getenv(
+        "WRF_HPC_GFS_MOUNT", HPC_STORAGE_ALIAS
+    ).strip().rstrip("/") or "/"
     hpc_gfs_min_free_gb: int = max(1, int(os.getenv("WRF_HPC_GFS_MIN_FREE_GB", "120")))
     hpc_runtime_min_free_gb: int = max(1, int(os.getenv("WRF_HPC_RUNTIME_MIN_FREE_GB", "110")))
     hpc_runtime_pre_wrf_min_free_gb: int = max(
@@ -169,7 +223,7 @@ class Settings:
         return [item.strip() for item in raw.split(",") if item.strip()]
 
     def ensure_directories(self) -> None:
-        for path in (self.data_dir, self.run_dir, self.output_dir, self.database_path.parent):
+        for path in (self.data_dir, self.run_dir, self.output_dir, self.database_path.parent, self.downscale_database_path.parent):
             path.mkdir(parents=True, exist_ok=True)
 
 

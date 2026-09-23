@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from auth import install_auth
 from config import settings
+from auth import install_auth
 from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError
@@ -22,8 +23,12 @@ from schemas import (
     WrfRecommendationRequest,
     WrfTaskCreate,
     WrfTaskRestartRequest,
+    normalize_task_request,
 )
 from task_manager import TaskConflictError, TaskNotFoundError, WrfTaskManager
+from downscale import DownscaleService, build_router as build_downscale_router
+from downscale.runner import DownscaleRunner
+from wrf_evidence_api import router as wrf_evidence_router
 
 
 settings.ensure_directories()
@@ -34,14 +39,68 @@ task_manager = WrfTaskManager(settings, store, gfs_manager, hpc_client)
 recommendation_manager = RecommendationManager(settings, hpc_client)
 
 
+def lookup_normal_wrf_task(task_id: str, owner_sub: str, owner_role: int) -> dict[str, Any] | None:
+    try:
+        task = task_manager.get(task_id)
+    except TaskNotFoundError:
+        return None
+    if owner_role < 3 and task.get("owner_sub") != owner_sub:
+        return None
+    return task
+
+
+def lookup_normal_wrf_artifact(task_id: str, owner_sub: str, owner_role: int) -> dict[str, Any] | None:
+    """Return a remote native-file inventory after the normal task ACL gate."""
+    if lookup_normal_wrf_task(task_id, owner_sub, owner_role) is None:
+        return None
+    try:
+        return hpc_client.inspect_wrf_source(task_id)
+    except (HpcError, ValueError) as exc:
+        return {"error": str(exc), "files": []}
+
+
+def lookup_downscale_forcing_manifest(task: dict[str, Any]) -> dict[str, Any] | None:
+    """Refresh a completed forcing manifest when it predates local caching."""
+    runtime = task.get("runtime") or {}
+    output_dir = str(runtime.get("remote_output_dir") or ((runtime.get("forcing") or {}).get("remote_output_dir") or ""))
+    if not output_dir:
+        return None
+    try:
+        return hpc_client.inspect_downscale_forcing_manifest(output_dir)
+    except (HpcError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def submit_auto_normal_wrf_task(request: dict[str, Any], owner_sub: str, idempotency_key: str | None) -> dict[str, Any]:
+    """Create the 1 km upstream task for a one-click high-resolution run."""
+    if idempotency_key:
+        return task_manager.submit_idempotent(request, owner_sub, idempotency_key)
+    return task_manager.submit(request, owner_sub)
+
+
+downscale_service = DownscaleService(
+    settings,
+    normal_task_lookup=lookup_normal_wrf_task,
+    source_artifact_lookup=lookup_normal_wrf_artifact,
+    forcing_manifest_lookup=lookup_downscale_forcing_manifest,
+    normal_task_submit=submit_auto_normal_wrf_task,
+    normal_task_cancel=task_manager.cancel,
+)
+downscale_runner = DownscaleRunner(settings, downscale_service, hpc_client)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     task_manager.start()
+    if settings.downscale_runner_enabled:
+        downscale_runner.start()
     try:
         yield
     finally:
+        downscale_runner.stop()
         task_manager.stop()
         recommendation_manager.stop()
+        downscale_service.close()
         store.close()
 
 
@@ -56,10 +115,15 @@ install_auth(
     app,
     [
         ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2}),
+        # 专业高分配置可由所有已登录 WRF 用户提交；资产与认证审核
+        # 仍在 downscale router 内强制要求管理员角色。
+        ("/api/wrf/downscale", {"GET": 1, "POST": 1, "DELETE": 1}),
+        ("/api/wrf/workbench/tasks", {"GET": 1}),
         ("/api/wrf/data-status", {"GET": 1, "*": 2}),
         ("/api/wrf/gfs", {"GET": 1, "*": 2}),
         ("/api/wrf/forcing", {"GET": 1, "*": 2}),
         ("/api/wrf/recommendations", {"GET": 1, "*": 2}),
+        ("/api/wrf/evidence", {"GET": 2, "POST": 2}),
         ("/api/wrf/options", {"GET": 1, "*": 2}),
         ("/api/wrf/hpc", 2),
         ("/api/wrf/display", 1),
@@ -91,6 +155,15 @@ def get_task(task_id: str) -> dict[str, Any]:
 def _viewer(request: Request) -> tuple[str, int]:
     user = getattr(request.state, "user", None) or {}
     return str(user.get("sub") or ""), int(user.get("role") or 0)
+
+
+def _normal_visible_tasks(request: Request, limit: int) -> list[dict[str, Any]]:
+    owner_sub, role = _viewer(request)
+    return task_manager.list(limit, None if role >= 3 else owner_sub)
+
+
+app.include_router(build_downscale_router(downscale_service, _viewer, _normal_visible_tasks))
+app.include_router(wrf_evidence_router)
 
 
 def get_visible_task(task_id: str, request: Request) -> dict[str, Any]:
@@ -126,7 +199,7 @@ def health() -> dict[str, Any]:
             "hpc": hpc_health,
             "gfs": {
                 "mode": "tx_lab_remote_pool",
-                "scope": "regional_subset",
+                "scope": "global",
                 "bounds": hpc_client.gfs_bounds,
                 "remote_root": settings.hpc_gfs_dir,
                 "storage_mount": settings.hpc_gfs_mount,
@@ -134,6 +207,11 @@ def health() -> dict[str, Any]:
                 "prefetch": task_manager.gfs_prefetch_status,
             },
             "forcing": {"mode": "tx_lab_remote_pool", "data_sources": ["gfs", "ecmwf"]},
+            "downscale": {
+                "runner_enabled": settings.downscale_runner_enabled,
+                "active_task_id": downscale_runner.active_task_id,
+                "stage_boundary": "normal_wrf_source_handoff",
+            },
         }
     )
 
@@ -152,8 +230,8 @@ def options() -> dict[str, Any]:
                 "fixed_spinup_hours": FIXED_SPINUP_HOURS,
                 "gfs_cycle_hours": [0],
                 "gfs_cycle_policy": "latest_covering_00z",
-                "gfs_product": "gfs-0p25-china",
-                "gfs_scope": "regional_subset",
+                "gfs_product": "gfs-0p25-global",
+                "gfs_scope": "global",
                 "gfs_bounds": hpc_client.gfs_bounds,
                 "gfs_download_mode": "hpc_remote_nomads_grib_filter",
                 "gfs_storage_path": settings.hpc_gfs_dir,
@@ -168,10 +246,13 @@ def options() -> dict[str, Any]:
                 "gfs_prefetch_enabled": settings.hpc_gfs_prefetch_enabled,
                 "gfs_prefetch_interval_seconds": settings.hpc_gfs_prefetch_interval_seconds,
                 "gfs_retained_cycles": settings.hpc_gfs_retained_cycles,
+                "pool_history_retention_days": settings.hpc_pool_history_retention_days,
                 "gfs_min_speed_bps": settings.hpc_gfs_min_speed_bps,
                 "gfs_slow_seconds": settings.hpc_gfs_slow_seconds,
                 "hpc_transfer_mode": settings.hpc_transfer_mode,
                 "hpc_import_legacy_gfs": settings.hpc_import_legacy_gfs,
+                "downscale_runner_enabled": settings.downscale_runner_enabled,
+                "downscale_runner_poll_seconds": settings.downscale_runner_poll_seconds,
             },
             "forecast_intervals": [1, 3, 6],
             "assimilation_schemes": [
@@ -185,6 +266,7 @@ def options() -> dict[str, Any]:
                 "热带对流": {"mp_physics": 6, "cu_physics": 5, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 1, "sf_sfclay_physics": 1, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
                 "冬季降雪": {"mp_physics": 16, "cu_physics": 0, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 2, "sf_sfclay_physics": 2, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
             },
+            "default_domain_count": 1,
             "default_domains": [
                 {"id": "d01", "dx": 27000, "dy": 27000, "e_we": 100, "e_sn": 79, "parent_id": 0, "parent_grid_ratio": 1, "i_parent_start": 1, "j_parent_start": 1},
                 {"id": "d02", "dx": 9000, "dy": 9000, "e_we": 79, "e_sn": 61, "parent_id": 1, "parent_grid_ratio": 3, "i_parent_start": 11, "j_parent_start": 11},
@@ -199,8 +281,12 @@ def options() -> dict[str, Any]:
 def data_status() -> dict[str, Any]:
     try:
         pool_items: list[dict[str, Any]] = []
-        status_priority = {"error": 4, "downloading": 3, "partial": 2, "ready": 1, "idle": 0}
+        status_priority = {
+            "failed": 5, "error": 5, "rate_limited": 4, "downloading": 3,
+            "retry_wait": 4, "waiting_publish": 2, "partial": 2, "ready": 1, "idle": 0,
+        }
         overall = "idle"
+        hpc_health = task_manager.hpc_health
         for source in ("gfs", "ecmwf"):
             target_cycles = gfs_manager.latest_cycles(
                 count=settings.hpc_gfs_retained_cycles,
@@ -225,13 +311,27 @@ def data_status() -> dict[str, Any]:
         return ok({
             "status": overall,
             "mode": "tx_lab_remote_pool",
-            "scope": "regional_subset",
+            "scope": "global",
             "bounds": hpc_client.gfs_bounds,
             "storage_path": settings.hpc_gfs_dir,
+            "storage_free_gb": hpc_health.get("gfs_free_gb"),
+            "runtime_free_gb": hpc_health.get("runtime_free_gb"),
+            "prefetch": task_manager.gfs_prefetch_status,
             "pool_items": pool_items,
         })
     except Exception as exc:
         return ok({"status": "unavailable", "mode": "tx_lab_remote_pool", "message": str(exc), "pool_items": []})
+
+
+@app.post("/api/wrf/forcing/prepare", status_code=202)
+def prepare_all_forcing() -> dict[str, Any]:
+    """Check GFS and ECMWF pools and start missing forecast downloads."""
+    try:
+        gfs = task_manager.sync_latest_gfs()
+        ec = sync_latest_remote_forcing("ecmwf").get("data") or {}
+        return ok({"providers": {"gfs": gfs, "ecmwf": ec}})
+    except (ValueError, HpcError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @app.post("/api/wrf/forcing/{data_source}/sync-latest", status_code=202)
@@ -240,14 +340,8 @@ def sync_latest_remote_forcing(data_source: str) -> dict[str, Any]:
     if source == "gfs":
         return sync_latest_remote_gfs()
     try:
-        target_cycles = gfs_manager.latest_cycles(count=settings.hpc_gfs_retained_cycles, data_source=source)
-        pool = hpc_client.forcing_pool_items(source, target_cycles, task_manager.active_forcing_cycles(source))
-        actions: list[dict[str, Any]] = []
-        for item in pool:
-            for cycle in item.get("cycles") or []:
-                if cycle.get("target") and not cycle.get("complete"):
-                    actions.append(hpc_client.trigger_forcing_download(source, str(cycle["cycle"]), 72))
-        return ok({"data_source": source, "target_cycles": target_cycles, "actions": actions})
+        result = task_manager.sync_latest_ecmwf()
+        return ok({"data_source": source, **result})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HpcError as exc:
@@ -286,7 +380,7 @@ def sync_latest_remote_gfs() -> dict[str, Any]:
         result = task_manager.sync_latest_gfs()
         return ok(
             result,
-            message=f"tx-lab 最近 {settings.hpc_gfs_retained_cycles} 个中国区域 00Z 周期已同步",
+            message=f"tx-lab 最近 {settings.hpc_gfs_retained_cycles} 个全球 GFS 00Z 周期已同步",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -340,15 +434,31 @@ def recommendation_detail(job_id: str) -> dict[str, Any]:
     return ok(job)
 
 
+@app.post("/api/wrf/tasks/validate")
+def validate_task(payload: WrfTaskCreate) -> dict[str, Any]:
+    return ok({"request": normalize_task_request(payload.model_dump(mode="json")),
+               "warnings": ["时间按 UTC 解释；固定 CPU 运行与 6 小时 spin-up",
+                            "已通过配置规则校验；不代表驱动资料和 HPC 当前可用", "计算将消耗资源，需显式确认"]})
+
+
 @app.post("/api/wrf/tasks", status_code=202)
 def create_task(payload: WrfTaskCreate, request: Request) -> dict[str, Any]:
+    key = request.headers.get("Idempotency-Key")
+    if key and (len(key) > 128 or not all(c.isalnum() or c in "-_" for c in key)):
+        raise HTTPException(status_code=422, detail="幂等键格式无效")
     hpc = task_manager.hpc_health
     if hpc.get("status") != "ready":
         hpc = task_manager.refresh_hpc_health()
     if hpc.get("status") != "ready":
         raise HTTPException(status_code=503, detail=f"tx-lab 环境未就绪：{hpc.get('message') or hpc.get('status')}")
     owner_sub, _ = _viewer(request)
-    task = task_manager.submit(payload.model_dump(mode="json"), owner_sub)
+    if not owner_sub:
+        raise HTTPException(status_code=401, detail="Token 缺少用户身份")
+    try:
+        task = (task_manager.submit_idempotent(payload.model_dump(mode="json"), owner_sub, key)
+                if key else task_manager.submit(payload.model_dump(mode="json"), owner_sub))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ok(task, message="WRF 任务已开始动态并行调度")
 
 
@@ -530,6 +640,25 @@ def task_result(task_id: str, request: Request) -> dict[str, Any]:
     if task["status"] not in {"succeeded", "partial_success"} or not task.get("result"):
         raise HTTPException(status_code=409, detail={"message": "WRF 任务尚未完成", "status": task["status"]})
     return ok(task["result"])
+
+
+@app.get("/api/wrf/tasks/{task_id}/summary")
+def task_summary(task_id: str, request: Request) -> dict[str, Any]:
+    task = get_visible_task(task_id, request)
+    meta = ((task.get("result") or {}).get("meta_json") or {}) if task.get("status") in {"succeeded", "partial_success"} else {}
+    domains = [{"id": domain.get("id"), "times": domain.get("times", []),
+                "variables": [{"name": var.get("name"), "units": var.get("units"),
+                               "frames": [{k: frame.get(k) for k in ("time", "min", "max", "mean")}
+                                          for frame in var.get("frames", [])[:1000]]}
+                              for var in domain.get("variables", [])]}
+               for domain in meta.get("domains", [])]
+    return ok({"task_id": task_id, "status": task.get("status"), "stage": task.get("stage"),
+               "progress": task.get("progress"), "domains": domains,
+               "quality_status": (meta.get("quality") or {}).get("status"),
+               "catalog_status": ((task.get("result") or {}).get("catalog_publication") or {}).get("status"),
+               "has_error": bool(task.get("error") or task.get("failure")),
+               "failure_class": (task.get("failure") or {}).get("failure_class"),
+               "message": "有异常，请在工作台查看任务日志" if task.get("error") or task.get("failure") else "任务状态已更新"})
 
 
 @app.get("/api/wrf/display")

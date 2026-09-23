@@ -57,7 +57,10 @@ def _manifest_bytes(manifest: dict[str, Any]) -> bytes:
 
 def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    reference_time = _parse_time(manifest.get("start_time"))
+    highres_semantics = manifest.get("product_semantics") in {"representative_steady_snapshot", "les_episode_statistics"}
+    representative_snapshot = manifest.get("product_semantics") == "representative_steady_snapshot"
+    les_statistics = manifest.get("product_semantics") == "les_episode_statistics"
+    reference_time = None if highres_semantics else _parse_time(manifest.get("start_time"))
     for domain in manifest.get("domains") or []:
         domain_id = str(domain.get("id") or "")
         grid = domain.get("grid") or []
@@ -71,6 +74,7 @@ def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: dat
                 if reference_time and valid_time:
                     forecast_hour = int(round((valid_time - reference_time).total_seconds() / 3600))
                 identity = f"{task_id}|{domain_id}|{name}|{frame.get('time')}|{url}"
+                height_agl_m = frame.get("height_agl_m", domain.get("height_agl_m"))
                 rows.append({
                     "asset_uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
                     "file_uuid": file_uuid,
@@ -78,10 +82,10 @@ def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: dat
                     "element_key": name,
                     "raw_element_name": name,
                     "element_label": variable.get("label") or variable.get("description") or name,
-                    "element_kind": "forecast",
+                    "element_kind": "microscale_snapshot" if representative_snapshot else ("microscale_les_statistics" if les_statistics else "forecast"),
                     "raw_unit": variable.get("units"),
                     "display_unit": variable.get("units"),
-                    "level_type": "surface",
+                    "level_type": "height_above_ground" if highres_semantics else "surface",
                     "valid_time": valid_time,
                     "frame_index": frame_index,
                     "resolution_key": domain_id or "native",
@@ -99,10 +103,10 @@ def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: dat
                     "missing_ratio": None,
                     "is_default": name == manifest.get("default_variable") and frame_index == 0,
                     "asset_status": "ready",
-                    "extra_json": json.dumps({"source_origin": "workbench", "source_task_id": task_id}, ensure_ascii=False),
+                    "extra_json": json.dumps({"source_origin": "workbench", "source_task_id": task_id, "product_semantics": manifest.get("product_semantics"), "snapshot_id": frame.get("snapshot_id"), "selection_reason": frame.get("selection_reason"), "height_agl_m": height_agl_m}, ensure_ascii=False),
                     "domain": domain_id,
                     "forecast_reference_time": reference_time,
-                    "forecast_hour": forecast_hour,
+                    "forecast_hour": None if highres_semantics else forecast_hour,
                     "dx_m": domain.get("dx"),
                     "dy_m": domain.get("dy"),
                     "source_resolution": f"{domain.get('dx')}m" if domain.get("dx") else None,

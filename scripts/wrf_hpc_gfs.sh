@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# tx-lab + GFS/ECMWF 专用 CPU 入口。
+# tx-lab WRF CPU 入口，支持 GFS 与 ECMWF 预报驱动场。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+storage_guard="${WRF_STORAGE_GUARD_SCRIPT:-${SCRIPT_DIR}/wrf_storage_guard.sh}"
+if [[ ! -r "$storage_guard" ]]; then
+    echo "[错误] 缺少数据盘保护脚本: ${storage_guard}" >&2
+    exit 3
+fi
+# shellcheck disable=SC1090
+source "$storage_guard"
+wrf_require_storage >/dev/null
 
 if [[ -z "${WRF_TASK_ENV:-}" || ! -s "${WRF_TASK_ENV}" ]]; then
     echo "[错误] 缺少任务运行环境文件 WRF_TASK_ENV" >&2
@@ -29,8 +38,8 @@ fi
 
 export WRF_RUNTIME="hpc"
 export WRF_NONINTERACTIVE="true"
-export WRF_GFS_DATA_ROOT="${WRF_GFS_DATA_ROOT:-/mnt/wrf-data/WRF/GFS}"
-export WRF_EC_CACHE_ROOT="${WRF_EC_CACHE_ROOT:-/home/tx-lab/WRFwork/DATA/ECMWF_CHINA}"
+export WRF_GFS_DATA_ROOT="${WRF_GFS_DATA_ROOT:-/home/tx-lab/.wrf-data/WRFwork/DATA/GFS}"
+export WRF_EC_CACHE_ROOT="${WRF_EC_CACHE_ROOT:-/home/tx-lab/.wrf-data/WRFwork/DATA/ECMWF}"
 export WRF_RUNTIME_ENV="${WRF_RUNTIME_ENV:-/home/tx-lab/WRFwork/env_wrf_nvhpc.sh}"
 export WRF_CPU_SOURCE_DIR="${WRF_CPU_SOURCE_DIR:-/home/tx-lab/WRFwork/WRF_BUILD/WRF_CPU}"
 export WRF_REQUESTED_RUNTIME_PROFILE="cpu"
@@ -76,7 +85,15 @@ fi
 actual_tag="${BASE_TASK_TAG}_attempt-1-cpu"
 actual_root="${WORK_DIR}/WRF_${actual_tag}"
 canonical_root="${WORK_DIR}/WRF_${BASE_TASK_TAG}"
-ln -sfn "$actual_root" "$canonical_root"
+# wrf.sh resolves WRF_WORK_DIR while this wrapper is sourced, before
+# run_cpu adds the attempt suffix.  Keep the canonical directory when the
+# run used it, and only publish an attempt directory when one was actually
+# created (for example after a future runtime fallback).
+if [[ -d "${actual_root}/run" ]]; then
+    ln -sfn "$actual_root" "$canonical_root"
+else
+    actual_root="$canonical_root"
+fi
 printf '%s\n' "cpu" > "${TASK_STATE_DIR}/actual_runtime_profile"
 printf '%s\n' "${actual_root}/run" > "${TASK_STATE_DIR}/remote_output_dir"
 printf '{"requested":"cpu","actual":"cpu","fallback_used":false}\n' \

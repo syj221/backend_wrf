@@ -6,4 +6,5 @@ netCDF4
 Pillow
 pexpect>=4.9,<5
 python-dotenv
+cdsapi
 SQLAlchemy>=2

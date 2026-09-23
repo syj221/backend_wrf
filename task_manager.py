@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import threading
@@ -74,9 +75,9 @@ class WrfTaskManager:
         self._gfs_prefetch: dict[str, Any] = {
             "enabled": bool(settings.hpc_gfs_prefetch_enabled and gfs is not None),
             "status": "idle" if settings.hpc_gfs_prefetch_enabled else "disabled",
-            "message": "等待后台检查最新 GFS 00Z"
+            "message": "等待后台检查最新 GFS、ECMWF 00Z"
             if settings.hpc_gfs_prefetch_enabled
-            else "GFS 后台预取已关闭",
+            else "GFS、ECMWF 后台预取已关闭",
             "interval_seconds": settings.hpc_gfs_prefetch_interval_seconds,
             "updated_at": None,
             "target_cycles": [],
@@ -152,23 +153,81 @@ class WrfTaskManager:
         if self.gfs is None:
             raise RuntimeError("GFS 周期管理器未配置")
         with self._gfs_sync_lock:
-            selected_cycles = list(target_cycles or self.gfs.latest_cycles())
+            selected_cycles = list(target_cycles or self.gfs.latest_cycles(
+                count=self.settings.hpc_gfs_retained_cycles,
+            ))
             protected_cycles = self.protected_gfs_cycles()
             auto_cleanup = {"requested": [], "deleted": [], "missing": []}
-            if cleanup_old_cycles:
-                auto_cleanup = self.hpc.auto_cleanup_gfs_cycles(
-                    selected_cycles,
-                    protected_cycles,
-                )
             pool = self.hpc.gfs_pool_items(selected_cycles, protected_cycles)[0]
             by_cycle = {item["cycle"]: item for item in pool.get("cycles") or []}
             actions: list[dict[str, Any]] = []
-            for cycle in reversed(selected_cycles):
+            for cycle in selected_cycles:
                 item = by_cycle.get(cycle) or {}
                 if item.get("complete"):
-                    actions.append({"cycle": cycle, "status": "ready", "detail": "73/73"})
+                    actions.append({"cycle": cycle, "status": "ready", "detail": f"{item.get('total_files', 73)}/{item.get('total_files', 73)}"})
                 else:
                     actions.append(self.hpc.trigger_gfs_download(cycle, 72))
+            # Never remove an old usable cycle until *both* replacement cycles
+            # are locally complete.  This keeps automatic fallback available.
+            refreshed = self.hpc.gfs_pool_items(selected_cycles, protected_cycles)[0]
+            refreshed_by_cycle = {item["cycle"]: item for item in refreshed.get("cycles") or []}
+            for action in actions:
+                item = refreshed_by_cycle.get(str(action.get("cycle") or "")) or {}
+                if item.get("status") in {"failed", "error", "retry_wait"} and not item.get("complete"):
+                    action["status"] = item["status"]
+                    action["detail"] = (
+                        item.get("queue_message")
+                        or item.get("download_message")
+                        or action.get("detail")
+                    )
+            if cleanup_old_cycles:
+                auto_cleanup = self.hpc.auto_cleanup_gfs_cycles(selected_cycles, protected_cycles)
+            return {
+                "target_cycles": selected_cycles,
+                "actions": actions,
+                "auto_cleanup": auto_cleanup,
+            }
+
+    def sync_latest_ecmwf(
+        self,
+        *,
+        cleanup_old_cycles: bool = True,
+        target_cycles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """预取最新 ECMWF 00Z 周期，规则与 GFS 共享池保持一致。"""
+        if self.gfs is None:
+            raise RuntimeError("ECMWF 周期管理器未配置")
+        with self._gfs_sync_lock:
+            selected_cycles = list(target_cycles or self.gfs.latest_cycles(
+                count=self.settings.hpc_gfs_retained_cycles,
+                data_source="ecmwf",
+            ))
+            protected_cycles = self.active_forcing_cycles("ecmwf")
+            auto_cleanup = {"requested": [], "deleted": [], "missing": []}
+            pool = self.hpc.forcing_pool_items("ecmwf", selected_cycles, protected_cycles)[0]
+            by_cycle = {item["cycle"]: item for item in pool.get("cycles") or []}
+            actions: list[dict[str, Any]] = []
+            for cycle in selected_cycles:
+                item = by_cycle.get(cycle) or {}
+                if item.get("complete"):
+                    actions.append({"cycle": cycle, "status": "ready", "detail": f"{item.get('total_files', 25)}/{item.get('total_files', 25)}"})
+                else:
+                    actions.append(self.hpc.trigger_forcing_download("ecmwf", cycle, 72))
+            refreshed = self.hpc.forcing_pool_items("ecmwf", selected_cycles, protected_cycles)[0]
+            refreshed_by_cycle = {item["cycle"]: item for item in refreshed.get("cycles") or []}
+            for action in actions:
+                item = refreshed_by_cycle.get(str(action.get("cycle") or "")) or {}
+                if item.get("status") in {"failed", "error", "retry_wait"} and not item.get("complete"):
+                    action["status"] = item["status"]
+                    action["detail"] = (
+                        item.get("queue_message")
+                        or item.get("download_message")
+                        or action.get("detail")
+                    )
+            if cleanup_old_cycles:
+                auto_cleanup = self.hpc.auto_cleanup_forcing_cycles(
+                    "ecmwf", selected_cycles, protected_cycles,
+                )
             return {
                 "target_cycles": selected_cycles,
                 "actions": actions,
@@ -178,27 +237,23 @@ class WrfTaskManager:
     def _prefetch_latest_gfs_once(self) -> None:
         if not self._gfs_prefetch.get("enabled"):
             return
+        # The remote node can be offline when 8007 starts and reconnect later
+        # overnight. Refresh on every cycle instead of relying on the one-time
+        # startup health thread, so a transient connection failure cannot leave
+        # prefetch permanently idle.
+        self._check_health()
         if self.hpc_health.get("status") != "ready":
-            storage_blocked = self.hpc_health.get("status") == "storage_unavailable"
+            storage_blocked = self.hpc_health.get("status") in {"storage_unavailable", "storage_low"}
             self._set_gfs_prefetch_status(
                 status="blocked_storage" if storage_blocked else "waiting_connection",
                 message=(
-                    "tx-lab GFS 存储不可用，已停止后台下载重试"
+                    self.hpc_health.get("message") or "tx-lab 数据池空间不足，本轮预取已跳过，将持续复查"
                     if storage_blocked
                     else "等待 tx-lab 连接恢复后继续后台预取"
                 ),
             )
             return
-        demand = self.pending_gfs_demand()
-        if demand["task_count"]:
-            cycles = "、".join(demand["cycles"]) or "周期选择中"
-            self._set_gfs_prefetch_status(
-                status="paused_for_task",
-                message=f"后台预取已让路：{demand['task_count']} 个任务需要 {cycles}",
-                task_demand=demand,
-            )
-            return
-        self._set_gfs_prefetch_status(status="checking", message="正在检查最新 GFS 00Z")
+        self._set_gfs_prefetch_status(status="checking", message="正在检查最新 GFS、ECMWF 00Z")
         try:
             # 只在新的受管中国区域池中保留配置数量的周期；活动任务周期始终受保护。
             result = self.sync_latest_gfs(
@@ -207,20 +262,30 @@ class WrfTaskManager:
                     count=self.settings.hpc_gfs_retained_cycles,
                 ),
             )
+            ec_result = self.sync_latest_ecmwf(cleanup_old_cycles=True)
         except Exception as exc:
             self._set_gfs_prefetch_status(status="error", message=str(exc))
             return
-        actions = result.get("actions") or []
+        gfs_actions = result.get("actions") or []
+        ec_actions = ec_result.get("actions") or []
+        actions = [
+            {"data_source": "gfs", **action} for action in gfs_actions
+        ] + [
+            {"data_source": "ecmwf", **action} for action in ec_actions
+        ]
         statuses = {str(item.get("status") or "") for item in actions}
         if actions and statuses == {"ready"}:
             status = "ready"
-            message = "最新 GFS 00Z 已就绪"
-        elif statuses & {"started", "running"}:
+            message = "最新两个 GFS、ECMWF 00Z 周期已就绪"
+        elif statuses & {"started", "running", "queued"}:
             status = "downloading"
-            message = "tx-lab 正在后台下载 GFS；完成后会继续检查新周期"
+            message = "tx-lab 正在后台下载 GFS/ECMWF；完成后会继续检查新周期"
+        elif statuses & {"retry_wait"}:
+            status = "retry_wait"
+            message = "GFS/ECMWF 暂时不可用，已进入退避重试"
         elif statuses & {"failed", "error"}:
             status = "error"
-            message = "GFS 后台下载启动失败，将自动重试"
+            message = "GFS/ECMWF 后台下载启动失败，将自动重试"
         else:
             status = "checked"
             message = "已完成 GFS 后台检查"
@@ -228,8 +293,12 @@ class WrfTaskManager:
             status=status,
             message=message,
             target_cycles=result.get("target_cycles") or [],
+            ecmwf_target_cycles=ec_result.get("target_cycles") or [],
             actions=actions,
-            auto_cleanup=result.get("auto_cleanup") or {},
+            auto_cleanup={
+                "gfs": result.get("auto_cleanup") or {},
+                "ecmwf": ec_result.get("auto_cleanup") or {},
+            },
         )
 
     def _gfs_prefetch_loop(self) -> None:
@@ -332,17 +401,21 @@ class WrfTaskManager:
         return True
 
     @staticmethod
-    def new_task_id(data_source: str = "gfs") -> str:
+    def new_task_id(data_source: str = "gfs", simulation_start: Any | None = None) -> str:
         source = str(data_source or "gfs").lower()
         if source not in {"gfs", "ecmwf"}:
             raise ValueError("数据源必须是 gfs 或 ecmwf")
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        if isinstance(simulation_start, str):
+            simulation_start = datetime.fromisoformat(simulation_start.replace("Z", "+00:00"))
+        if not isinstance(simulation_start, datetime):
+            raise ValueError("任务 ID 需要有效的模拟起报时间")
+        stamp = simulation_start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"wrf_{source}_{stamp}_{uuid.uuid4().hex[:8]}"
 
     def submit(self, request: dict[str, Any], owner_sub: str = "") -> dict[str, Any]:
         request = normalize_task_request(request)
         data_source = str(request.get("data_source") or "gfs").lower()
-        task_id = self.new_task_id(data_source)
+        task_id = self.new_task_id(data_source, request["start_time"])
         task_dir = self.settings.run_dir / task_id
         (task_dir / "raw").mkdir(parents=True, exist_ok=False)
         (task_dir / "task.request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -357,6 +430,38 @@ class WrfTaskManager:
         self._dispatch(task_id)
         self._log(task_id, f"{data_source.upper()} 任务已提交，开始动态并行调度")
         return task
+
+    def submit_idempotent(self, request: dict[str, Any], owner_sub: str, key: str) -> dict[str, Any]:
+        """Single-worker submission gate; durable reservation survives request timeouts/restarts."""
+        request = normalize_task_request(request)
+        source = str(request.get("data_source") or "gfs").lower()
+        simulation_start = request["start_time"]
+        if isinstance(simulation_start, str):
+            simulation_start = datetime.fromisoformat(simulation_start.replace("Z", "+00:00"))
+        stamp = simulation_start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        task_id = f"wrf_{source}_{stamp}_" + hashlib.sha256(f"{owner_sub}:{key}".encode()).hexdigest()[:8]
+        with self._state_lock:
+            reservation = self.store.reserve_submission(owner_sub, key, request, task_id)
+            existing = self.store.get(task_id)
+            if existing:
+                self.store.accept_submission(owner_sub, key)
+                if existing["status"] == "queued" and task_id not in self._task_threads:
+                    self._dispatch(task_id)
+                return existing
+            if reservation["accepted"]:
+                raise ValueError("该提交对应任务已删除，不能复用原确认重新计算")
+            task_dir = self.settings.run_dir / task_id
+            (task_dir / "raw").mkdir(parents=True, exist_ok=True)
+            (task_dir / "task.request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.create(task_id, request, owner_sub)
+            self.store.accept_submission(owner_sub, key)
+            task = self._merge_runtime(task_id,
+                attempt_started_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                requested_runtime_profile=FIXED_RUNTIME_PROFILE, active_runtime_profile=FIXED_RUNTIME_PROFILE,
+                fallback_used=False)
+            self._dispatch(task_id)
+            self._log(task_id, "Agent 已确认任务提交，开始动态并行调度")
+            return task
 
     @staticmethod
     def _decorate_legacy_failure(task: dict[str, Any]) -> dict[str, Any]:
@@ -438,25 +543,33 @@ class WrfTaskManager:
     def protected_gfs_cycles(self) -> set[str]:
         return self.active_gfs_cycles() | self.retained_gfs_cycles()
 
-    def pending_gfs_demand(self) -> dict[str, Any]:
-        waiting_stages = {
-            "queued",
-            "selecting_cycle",
-            "checking_hpc_gfs",
-            "waiting_for_hpc_gfs",
-        }
-        tasks = [
-            task
-            for task in self.store.active()
-            if task.get("status") in {"queued", "prefetching"}
-            or task.get("stage") in waiting_stages
-        ]
-        cycles = sorted({
-            str((task.get("runtime") or {}).get("gfs_cycle"))
-            for task in tasks
-            if (task.get("runtime") or {}).get("gfs_cycle")
-        })
-        return {"task_count": len(tasks), "cycles": cycles}
+    def _select_pool_cycle(
+        self,
+        data_source: str,
+        model_start: datetime,
+        end: datetime,
+        interval: int,
+        requested_cycle: str,
+    ) -> tuple[str, list[int]]:
+        """Select the newest complete local cycle that covers this task.
+
+        The nominal cycle remains the demand target when no complete fallback
+        exists, allowing the source queue to download only the task's fields.
+        """
+        requested_hours = self.gfs.required_hours(
+            model_start, end, interval, requested_cycle, data_source=data_source,
+        )
+        complete_cycles = getattr(self.hpc, "complete_forcing_cycles", None)
+        if complete_cycles:
+            for candidate in complete_cycles(data_source):
+                try:
+                    hours = self.gfs.required_hours(
+                        model_start, end, interval, candidate, data_source=data_source,
+                    )
+                except ValueError:
+                    continue
+                return candidate, hours
+        return requested_cycle, requested_hours
 
     def retry(self, task_id: str) -> dict[str, Any]:
         self.get(task_id)
@@ -609,7 +722,7 @@ class WrfTaskManager:
         if task["status"] != "failed":
             raise TaskConflictError("只有失败任务可以重试结果下载")
         runtime = dict(task.get("runtime") or {})
-        if not runtime.get("remote_wrf_succeeded") or not runtime.get("gfs_cycle"):
+        if not runtime.get("remote_wrf_succeeded") or not self._forcing_cycle(runtime):
             raise TaskConflictError("远端 WRF 尚未成功完成，不能仅重试结果下载")
         runtime["retry_outputs_only"] = True
         with self._state_lock:
@@ -631,7 +744,7 @@ class WrfTaskManager:
         runtime = dict(task.get("runtime") or {})
         if task["status"] != "failed":
             raise TaskConflictError("只有结果完整性校验失败的任务可以部分渲染")
-        if not runtime.get("remote_wrf_succeeded") or not runtime.get("gfs_cycle"):
+        if not runtime.get("remote_wrf_succeeded") or not self._forcing_cycle(runtime):
             raise TaskConflictError("远端 WRF 尚未成功完成，不能部分渲染")
         known_invalid = (runtime.get("output_validation") or {}).get("invalid")
         legacy_render_error = any(
@@ -1184,9 +1297,9 @@ class WrfTaskManager:
                 raise RuntimeError(
                     f"远端 WRF 尚未成功完成，不能仅恢复结果：{remote_status.get('status', 'unknown')}"
                 )
-            cycle = runtime.get("gfs_cycle")
+            cycle = self._forcing_cycle(runtime)
             if not cycle:
-                raise RuntimeError("恢复结果下载缺少 GFS cycle")
+                raise RuntimeError("恢复结果下载缺少驱动场 cycle")
             self._merge_runtime(
                 task_id,
                 retry_outputs_only=False,
@@ -1206,16 +1319,16 @@ class WrfTaskManager:
                     return
                 self._merge_runtime(task_id, remote_wrf_succeeded=True)
                 task = self.get(task_id)
-                cycle = (task.get("runtime") or {}).get("gfs_cycle")
+                cycle = self._forcing_cycle(task.get("runtime") or {})
                 if not cycle:
-                    raise RuntimeError("恢复任务缺少 GFS cycle")
+                    raise RuntimeError("恢复任务缺少驱动场 cycle")
                 self._finalize(task_id, cycle)
                 return
             if action == "finalize":
                 self._merge_runtime(task_id, remote_wrf_succeeded=True)
-                cycle = runtime.get("gfs_cycle")
+                cycle = self._forcing_cycle(runtime)
                 if not cycle:
-                    raise RuntimeError("恢复任务缺少 GFS cycle")
+                    raise RuntimeError("恢复任务缺少驱动场 cycle")
                 self._finalize(task_id, cycle)
                 return
 
@@ -1256,19 +1369,30 @@ class WrfTaskManager:
         )
         self._log(task_id, f"产品起报前增加 {spinup_hours} 小时 spin-up；按固定 00Z 策略选择 {source_label} cycle")
         self._raise_if_cancelled(task_id)
-        cycle, _ = self.gfs.select_cycle(model_start, end, data_source=data_source)
+        requested_cycle, _ = self.gfs.select_cycle(model_start, end, data_source=data_source)
         self._raise_if_cancelled(task_id)
         interval = int(request.get("forecast_interval_hours") or 1)
-        hours = self.gfs.required_hours(model_start, end, interval, cycle, data_source=data_source)
+        # Prefer the newest complete local cycle that covers the precise
+        # spin-up and boundary window. The nominal latest cycle may still be
+        # publishing in the upstream feed.
+        cycle, hours = self._select_pool_cycle(
+            data_source, model_start, end, interval, requested_cycle,
+        )
+        if cycle != requested_cycle:
+            self._log(
+                task_id,
+                f"{source_label} 最新周期 {requested_cycle} 尚未完整，自动回退至完整周期 {cycle}",
+            )
         self._merge_runtime(
             task_id,
             data_source=data_source,
             forcing_cycle=cycle,
             **({f"{data_source}_cycle": cycle} if data_source != "gfs" else {}),
-            gfs_cycle=cycle,
+            **({"gfs_cycle": cycle} if data_source == "gfs" else {}),
             forecast_hours=hours,
             spinup_hours=spinup_hours,
             model_start_time=model_start.isoformat().replace("+00:00", "Z"),
+            forcing_cycle_fallback_from=(requested_cycle if cycle != requested_cycle else None),
         )
 
         with self._prepare_cycle(task_id, cycle, data_source):

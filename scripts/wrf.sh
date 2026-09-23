@@ -25,8 +25,6 @@ WRF_RUNTIME="${WRF_RUNTIME:-hpc}"
 if [ "$WRF_RUNTIME" = "macos" ]; then
     export USER_HOME="${USER_HOME:-$HOME}"
     export WORK_DIR="${WORK_DIR:-${USER_HOME}/wrf-macos/work}"
-    export ERA5_DATA_DIR="${ERA5_DATA_DIR:-${USER_HOME}/Data/ERA5}"
-    export ERA5_SOURCE_DIR="${ERA5_SOURCE_DIR:-}"
     export GEOG_DATA_PATH="${GEOG_DATA_PATH:-${USER_HOME}/wrf-macos/WPS_GEOG}"
     export WPS_INSTALL_DIR="${WPS_INSTALL_DIR:-${USER_HOME}/wrf-macos/install/WPS-4.7.0}"
     export WPS_RUNTIME_DIR="${WPS_RUNTIME_DIR:-${USER_HOME}/wrf-macos/src/WPS-4.7.0}"
@@ -36,12 +34,10 @@ else
     export USER_HOME="${USER_HOME:-${HOME}}"
 
 # 数据与模型目录
-export ERA5_DATA_DIR="${ERA5_DATA_DIR:-${USER_HOME}/Data/ERA5}" # 未由 GFS 入口使用
 export MODEL_DIR="${MODEL_DIR:-${USER_HOME}/Model}"
 export WORK_DIR="${WORK_DIR:-${USER_HOME}/WRFwork}"
 
 # 系统级共享数据目录（只读）
-export ERA5_SOURCE_DIR="${ERA5_SOURCE_DIR:-/share/data/ERA5}"
 export GEOG_DATA_PATH="${GEOG_DATA_PATH:-/share/data/WPS_GEOG}"
 
 # 模型源文件夹名称
@@ -398,6 +394,38 @@ csv_fdda_by_resolution() {
     echo "$out"
 }
 
+# Choose the largest stable outer-domain time step that lands exactly on the
+# forcing records.  The historical 5 s/km rule gives 135 s at 27 km, but an
+# hourly GFS FDDA file requires a time step that divides 3600 s; otherwise WRF
+# reaches e.g. 01:00:45 and cannot find the 01:00:00 record in wrffdda_d01.
+# The selected value remains below the conservative 5 s/km CFL target and the
+# nested domains derive their smaller steps through parent_time_step_ratio.
+select_time_step_for_forcing() {
+    local dx_m="$1"
+    local forcing_seconds="$2"
+    local dx_km max_step candidate
+
+    if ! [[ "$dx_m" =~ ^[0-9]+$ ]] || [ "$dx_m" -lt 1000 ]; then
+        log_warn "外层分辨率无效 (${dx_m:-<未设置})，使用 1s 时间步以保证资料时间对齐" >&2
+        echo 1
+        return 0
+    fi
+    if ! [[ "$forcing_seconds" =~ ^[0-9]+$ ]] || [ "$forcing_seconds" -lt 1 ]; then
+        log_warn "驱动资料间隔无效 (${forcing_seconds:-<未设置})，使用 1s 时间步以保证资料时间对齐" >&2
+        echo 1
+        return 0
+    fi
+
+    dx_km=$((10#$dx_m / 1000))
+    max_step=$((5 * dx_km))
+    [ "$max_step" -lt 1 ] && max_step=1
+    candidate="$max_step"
+    while [ "$candidate" -gt 1 ] && [ $((forcing_seconds % candidate)) -ne 0 ]; do
+        candidate=$((candidate - 1))
+    done
+    echo "$candidate"
+}
+
 csv_parent_ids_wps() {
     local out=""
     local max_dom=${WRF_MAX_DOM:-2}
@@ -535,7 +563,7 @@ tr = cfg.get("time_range", {})
 center = cfg.get("center", {})
 phys = cfg.get("physics", {})
 emit("WRF_TASK_TAG", cfg.get("output", {}).get("task_tag") or cfg.get("display_id"))
-emit("WRF_DATA_SOURCE", cfg.get("data_source", "era5"))
+emit("WRF_DATA_SOURCE", cfg.get("data_source", "gfs"))
 emit("WRF_MAX_DOM", cfg.get("max_dom", len(cfg.get("domains", [])) or 1))
 emit("WRF_START_YEAR", tr.get("start_year"))
 emit("WRF_START_MONTH", f"{int(tr.get('start_month')):02d}" if tr.get("start_month") is not None else None)
@@ -547,6 +575,8 @@ emit("WRF_END_DAY", f"{int(tr.get('end_day')):02d}" if tr.get("end_day") is not 
 emit("WRF_END_HOUR", f"{int(tr.get('end_hour')):02d}" if tr.get("end_hour") is not None else None)
 emit("WRF_REF_LAT", center.get("lat"))
 emit("WRF_REF_LON", center.get("lon"))
+emit("WRF_REF_X", center.get("grid_x"))
+emit("WRF_REF_Y", center.get("grid_y"))
 mapping = {
     "num_metgrid_levels": "WRF_NUM_METGRID_LEVELS",
     "mp_physics": "WRF_MP_PHYSICS",
@@ -563,9 +593,8 @@ mapping = {
 }
 for key, env in mapping.items():
     emit(env, phys.get(key))
-if cfg.get("data_source", "era5") == "gfs":
-    # 标准 GFS Vtable 的 met_em 垂直维度为 34；即使旧任务配置残留了
-    # ERA5 的 38，也必须在运行前纠正，否则 real.exe 会拒绝初始化。
+if cfg.get("data_source", "gfs") == "gfs":
+    # 标准 GFS Vtable 的 met_em 垂直维度为 34，运行前固定该值。
     emit("WRF_NUM_METGRID_LEVELS", 34)
 gfs = cfg.get("gfs_cache", {})
 emit("WRF_GFS_DATE", gfs.get("gfs_cycle_date") or gfs.get("cycle_date"))
@@ -641,6 +670,26 @@ step1_data_preparation() {
     log_step "步骤1: 数据准备 - 按模拟时段检查用户数据/从系统源目录链接ERA5数据"
     log_info "用户数据目录: ${ERA5_DATA_DIR}"
     log_info "系统源数据目录: ${ERA5_SOURCE_DIR}"
+    # WRF 工作台 ERA5 只能使用本任务从 CDS 下载的私有 GRIB；绝不回退
+    # 到项目历史 ERA5 解析/展示目录或旧的按年月共享目录。
+    if [ "${WRF_ERA5_TASK_SCOPED:-false}" = "true" ]; then
+        local pressure_files=() surface_files=()
+        shopt -s nullglob
+        pressure_files=("${ERA5_DATA_DIR}"/pressure*.grib)
+        surface_files=("${ERA5_DATA_DIR}"/surface*.grib)
+        shopt -u nullglob
+        if [ "${#pressure_files[@]}" -eq 0 ] || [ "${#surface_files[@]}" -eq 0 ]; then
+            log_error "缺少本任务独立下载的 ERA5 pressure/surface GRIB，禁止使用共享历史数据"
+            return 1
+        fi
+        log_info "已确认本任务链接的 ERA5 全球日缓存（${#pressure_files[@]} 个 pressure 文件）"
+        return 0
+    fi
+    # 兼容非工作台的旧 ERA5 入口。
+    if [ -s "${ERA5_DATA_DIR}/pressure.grib" ] && [ -s "${ERA5_DATA_DIR}/surface.grib" ]; then
+        log_info "发现任务级 ERA5 驱动资料（pressure/surface），跳过旧年月目录链接"
+        return 0
+    fi
 
     # 收集模拟时段覆盖的所有年月
     local year_months=()
@@ -1097,6 +1146,8 @@ step3_wps_processing() {
  dx                   = ${WRF_DX_D01:-9000}
  dy                   = ${WRF_DY_D01:-9000}
  map_proj             = 'lambert'
+ ${WRF_REF_X:+ref_x = ${WRF_REF_X},}
+ ${WRF_REF_Y:+ref_y = ${WRF_REF_Y},}
  ref_lat              = ${REF_LAT}
  ref_lon              = ${REF_LON}
  truelat1             = ${REF_LAT}
@@ -1124,7 +1175,7 @@ WPS_EOF
 
     # 3.2 链接模拟时段对应的数据
     local link_count=0
-    if [ "${WRF_DATA_SOURCE:-era5}" = "gfs" ] || [ "${WRF_DATA_SOURCE:-era5}" = "ec" ]; then
+    if [ "${WRF_DATA_SOURCE:-gfs}" = "gfs" ] || [ "${WRF_DATA_SOURCE:-gfs}" = "ec" ]; then
         local forecast_provider="${WRF_DATA_SOURCE}"
         local data_date data_hour forecast_hours data_root file_prefix file_suffix file_extension
         if [ "$forecast_provider" = "ec" ]; then
@@ -1175,54 +1226,8 @@ WPS_EOF
             exit 1
         fi
     else
-        log_info "链接模拟时段对应的ERA5数据..."
-
-        # 遍历年份/月份目录，链接与模拟时段匹配的数据
-        local cur_year=$START_YEAR
-        while [ "$cur_year" -le "$END_YEAR" ]; do
-        local start_m=$((10#$START_MONTH))
-        local end_m=$((10#$END_MONTH))
-        if [ "$cur_year" -eq "$START_YEAR" ] && [ "$cur_year" -eq "$END_YEAR" ]; then
-            # 同年
-            first_month=$start_m
-            last_month=$end_m
-        elif [ "$cur_year" -eq "$START_YEAR" ]; then
-            first_month=$start_m
-            last_month=12
-        elif [ "$cur_year" -eq "$END_YEAR" ]; then
-            first_month=1
-            last_month=$end_m
-        else
-            first_month=1
-            last_month=12
-        fi
-
-        local cur_month=$first_month
-        while [ "$cur_month" -le "$last_month" ]; do
-            local month_str=$(fmt2 "$cur_month")
-            local data_dir="${ERA5_DATA_DIR}/${cur_year}/${month_str}"
-            if [ -d "$data_dir" ]; then
-                log_info "  链接 ${cur_year}/${month_str} 的数据..."
-                for file in ${data_dir}/*; do
-                    if [ -f "$file" ] || [ -L "$file" ]; then
-                        ln -sf "$file" "$(basename "$file")"
-                        link_count=$((link_count + 1))
-                    fi
-                done
-            else
-                log_warn "  ${data_dir} 不存在，跳过"
-            fi
-            cur_month=$((cur_month + 1))
-        done
-            cur_year=$((cur_year + 1))
-        done
-
-        log_info "共链接 ${link_count} 个数据文件"
-        if [ "$link_count" -eq 0 ]; then
-            log_error "没有找到模拟时段对应的ERA5数据！"
-            log_error "请确认 ${ERA5_DATA_DIR}/ 下是否有对应年月的数据"
-            exit 1
-        fi
+        log_error "不支持的数据源: ${WRF_DATA_SOURCE:-未设置}"
+        exit 1
     fi
     log_info "当前目录中的GRIB文件:"
     # NOAA 完整 GFS 使用 *.pgrb2.0p25.fNNN 命名。逐个检查通配符，既能
@@ -1241,7 +1246,7 @@ WPS_EOF
 
     # 3.3 设置Vtable (根据数据源选择)
     log_info "设置Vtable链接..."
-    if [ "${WRF_DATA_SOURCE:-era5}" = "gfs" ]; then
+    if [ "${WRF_DATA_SOURCE:-gfs}" = "gfs" ]; then
         if [ -f "ungrib/Variable_Tables/Vtable.GFS" ]; then
             ln -sf ungrib/Variable_Tables/Vtable.GFS Vtable
             log_info "Vtable设置完成 (GFS)"
@@ -1249,7 +1254,7 @@ WPS_EOF
             log_warn "未找到 Vtable.GFS，回退到 ERA-interim"
             ln -sf ungrib/Variable_Tables/Vtable.ERA-interim.pl Vtable
         fi
-    elif [ "${WRF_DATA_SOURCE:-era5}" = "ec" ]; then
+    elif [ "${WRF_DATA_SOURCE:-gfs}" = "ec" ]; then
         if [ -n "${WRF_EC_VTABLE:-}" ] && [ -f "${WRF_EC_VTABLE}" ]; then
             ln -sf "${WRF_EC_VTABLE}" Vtable
             log_info "Vtable设置完成 (EC Open Data)"
@@ -1269,7 +1274,7 @@ WPS_EOF
     else
         log_warn "未找到标准Vtable，请手动设置"
     fi
-    if [ "${WRF_DATA_SOURCE:-era5}" = "ec" ] && [ -f Vtable ]; then
+    if [ "${WRF_DATA_SOURCE:-gfs}" = "ec" ] && [ -f Vtable ]; then
         local ec_vtable_source
         ec_vtable_source=$(readlink -f Vtable 2>/dev/null || printf '%s\n' Vtable)
         cp -f "$ec_vtable_source" Vtable.ec_open_data
@@ -1518,10 +1523,20 @@ step4_wrf_running() {
     log_info "运行时长: ${RUN_DAYS}天 ${RUN_HOURS}时 ${RUN_MINUTES}分 ${RUN_SECONDS}秒 (${diff_seconds}s)"
 
     # 4.3 动态计算 time_step (CFL: time_step ≤ 6×dx(km)，取 5×dx 更稳健)
+    # 同时要求时间步整除驱动资料间隔，保证 FDDA 在整点读取 GFS/ECMWF
+    # 记录。GFS 1 小时资料在 27 km 外层网格上因此使用 120s，而不是
+    # 传统 5×dx 得到的 135s；ECMWF 3 小时资料仍可使用 135s。
     WRF_DX=${WRF_DX:-9000}
     DX_OUTER_KM=$(( ${WRF_DX} / 1000 ))
-    TIME_STEP=$((5 * DX_OUTER_KM))
-    log_info "外层分辨率: ${WRF_DX}m, time_step: ${TIME_STEP}s (5×${DX_OUTER_KM}km)"
+    WRF_FORECAST_FILE_INTERVAL_HOURS=${WRF_FORECAST_FILE_INTERVAL_HOURS:-${WRF_GFS_FILE_INTERVAL_HOURS:-${WRF_EC_FILE_INTERVAL_HOURS:-6}}}
+    WRF_INTERVAL_SECONDS=$((10#$WRF_FORECAST_FILE_INTERVAL_HOURS * 3600))
+    CFL_TIME_STEP=$((5 * DX_OUTER_KM))
+    TIME_STEP=$(select_time_step_for_forcing "$WRF_DX" "$WRF_INTERVAL_SECONDS")
+    if [ "$TIME_STEP" -lt "$CFL_TIME_STEP" ]; then
+        log_info "外层分辨率: ${WRF_DX}m, 原始 CFL 时间步=${CFL_TIME_STEP}s；${WRF_FORECAST_FILE_INTERVAL_HOURS}小时驱动间隔要求整除，采用 time_step=${TIME_STEP}s"
+    else
+        log_info "外层分辨率: ${WRF_DX}m, time_step: ${TIME_STEP}s (5×${DX_OUTER_KM}km)，可整除 ${WRF_FORECAST_FILE_INTERVAL_HOURS}小时驱动间隔"
+    fi
     OUTPUT_INTERVAL_SECONDS=3600
     if [ $((OUTPUT_INTERVAL_SECONDS % TIME_STEP)) -eq 0 ]; then
         log_info "输出时次检查: ${OUTPUT_INTERVAL_SECONDS}s 可被 time_step=${TIME_STEP}s 整除"
@@ -1536,6 +1551,7 @@ step4_wrf_running() {
     local WRF_BOOL_TRUE WRF_HISTORY WRF_HISTORY_BEGIN WRF_E_WE WRF_E_SN WRF_E_VERT WRF_DX_CSV WRF_DY_CSV
     local WRF_GRID_IDS WRF_PARENT_IDS WRF_I_STARTS WRF_J_STARTS WRF_SPECIFIED WRF_NESTED
     local WRF_MP WRF_CU WRF_RA_LW WRF_RA_SW WRF_PBL WRF_SFCLAY WRF_SURFACE WRF_RADT WRF_URBAN
+    local WRF_RESTART_INTERVAL
     WRF_START_YEARS=$(csv_repeat "${START_YEAR}")
     WRF_START_MONTHS=$(csv_repeat "${START_MONTH}")
     WRF_START_DAYS=$(csv_repeat "${START_DAY}")
@@ -1549,7 +1565,10 @@ step4_wrf_running() {
     WRF_HISTORY_BEGIN=$(csv_repeat "${WRF_HISTORY_BEGIN_MINUTES:-0}")
     WRF_E_WE=$(csv_join_domains WRF_E_WE 100)
     WRF_E_SN=$(csv_join_domains WRF_E_SN 80)
-    WRF_E_VERT=$(csv_repeat "38")
+    # Keep the ordinary WRF parent vertically compatible with the WRF-LES
+    # ndown chain.  Existing historical runs retain their original inputs;
+    # newly generated parent tasks use 88 levels unless explicitly overridden.
+    WRF_E_VERT=$(csv_repeat "${WRF_E_VERT:-88}")
     WRF_DX_CSV=$(csv_join_domains WRF_DX 27000)
     WRF_DY_CSV=$(csv_join_domains WRF_DY 27000)
     WRF_GRID_IDS=$(csv_grid_ids)
@@ -1567,8 +1586,13 @@ step4_wrf_running() {
     WRF_SURFACE=$(csv_repeat "${WRF_SF_SURFACE_PHYSICS:-2}")
     WRF_RADT=$(csv_repeat "${WRF_RADT:-5}")
     WRF_URBAN=${WRF_SF_URBAN_PHYSICS_BY_DOMAIN:-$(csv_repeat "${WRF_SF_URBAN_PHYSICS:-0}")}
-    WRF_FORECAST_FILE_INTERVAL_HOURS=${WRF_FORECAST_FILE_INTERVAL_HOURS:-${WRF_GFS_FILE_INTERVAL_HOURS:-${WRF_EC_FILE_INTERVAL_HOURS:-6}}}
-    WRF_INTERVAL_SECONDS=$((10#$WRF_FORECAST_FILE_INTERVAL_HOURS * 3600))
+    # 高分路线的 ndown 需要普通 WRF 在每个业务时次保留可核验的重启场。
+    # 允许专项试验覆盖，但业务默认固定为 1 小时。
+    WRF_RESTART_INTERVAL=${WRF_RESTART_INTERVAL_MINUTES:-60}
+    if ! [[ "$WRF_RESTART_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "WRF_RESTART_INTERVAL_MINUTES 必须是正整数分钟"
+        exit 1
+    fi
     WRF_ASSIMILATION_SCHEME=${WRF_ASSIMILATION_SCHEME:-off}
     local WRF_GRID_FDDA WRF_FDDA_END_H WRF_GUV WRF_GT WRF_GQ
     WRF_ASSIM_SPINUP_HOURS=${WRF_ASSIM_SPINUP_HOURS:-0}
@@ -1607,7 +1631,7 @@ step4_wrf_running() {
  frames_per_outfile                  = $(csv_repeat "1"),
  adjust_output_times                 = .true.,
  restart                             = .false.,
- restart_interval                    = 7200,
+ restart_interval                    = ${WRF_RESTART_INTERVAL},
  io_form_history                     = 2,
  io_form_restart                     = 2,
  io_form_input                       = 2,
@@ -1893,18 +1917,17 @@ main() {
     END_EPOCH=$(date_to_epoch "${END_YEAR}-${END_MONTH}-${END_DAY} ${END_HOUR}:00:00")
 
     # 执行各个步骤 (根据数据源分发)
-    if [ "${WRF_DATA_SOURCE:-era5}" = "gfs" ]; then
+    if [ "${WRF_DATA_SOURCE:-gfs}" = "gfs" ]; then
         log_info "数据源: GFS"
         write_stage "data" "running" "准备GFS数据"
         step1_gfs_data_preparation
-    elif [ "${WRF_DATA_SOURCE:-era5}" = "ec" ]; then
+    elif [ "${WRF_DATA_SOURCE:-gfs}" = "ec" ]; then
         log_info "数据源: ECMWF IFS Open Data"
         write_stage "data" "running" "准备EC数据"
         step1_ec_data_preparation
     else
-        log_info "数据源: ERA5"
-        write_stage "data" "running" "准备ERA5数据"
-        step1_data_preparation
+        log_error "不支持的数据源: ${WRF_DATA_SOURCE:-未设置}"
+        exit 1
     fi
     write_stage "data" "done" "数据准备完成"
     write_stage "workspace" "running" "创建工作目录"

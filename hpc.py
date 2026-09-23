@@ -17,7 +17,7 @@ from schemas import FIXED_RUNTIME_PROFILE, FIXED_SPINUP_HOURS, normalize_task_re
 
 
 SAFE_TASK_ID = re.compile(r"^wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
-SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[A-Za-z0-9_./-]*$")
+SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[^\s;|&<>`$(){}\[\]\\\"']*$")
 SAFE_GFS_NAME = re.compile(r"^gfs\.t(?P<cycle_hour>[0-9]{2})z\.pgrb2\.0p25\.f(?P<forecast_hour>[0-9]{3})$")
 SAFE_EC_NAME = re.compile(r"^ecmwf\.t(?P<cycle_hour>[0-9]{2})z\.ifs\.0p25\.f(?P<forecast_hour>[0-9]{3})\.grib2$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -418,8 +418,9 @@ while {1} {
         self.run(f"mkdir -p {service_dir} {task_dir}")
         self.upload(script_dir / "wrf.sh", f"{service_dir}/wrf.sh")
         self.upload(script_dir / "wrf_hpc_gfs.sh", f"{service_dir}/wrf_hpc_gfs.sh")
+        self.upload(script_dir / "wrf_storage_guard.sh", f"{service_dir}/wrf_storage_guard.sh")
         self.upload(config_path, f"{task_dir}/task.json")
-        self.run(f"chmod 700 {service_dir}/wrf.sh {service_dir}/wrf_hpc_gfs.sh")
+        self.run(f"chmod 700 {service_dir}/wrf.sh {service_dir}/wrf_hpc_gfs.sh {service_dir}/wrf_storage_guard.sh")
 
     def launch(self, task_id: str) -> dict[str, Any]:
         service_dir, task_dir = self.service_dir(), self.task_dir(task_id)
@@ -561,10 +562,19 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
         "WRF_END_HOUR": f"{int(time_range['end_hour']):02d}",
         "WRF_REF_LAT": center["lat"],
         "WRF_REF_LON": center["lon"],
+        "WRF_REF_X": center.get("grid_x") or (config["domains"][0]["e_we"] + 1) / 2,
+        "WRF_REF_Y": center.get("grid_y") or (config["domains"][0]["e_sn"] + 1) / 2,
         "WRF_FORECAST_FILE_INTERVAL_HOURS": forcing[f"{cache_prefix}_file_interval_hours"],
         "WRF_ASSIMILATION_SCHEME": assimilation["scheme"],
         "WRF_ASSIM_SPINUP_HOURS": time_range.get("spinup_hours", 0),
         "WRF_HISTORY_BEGIN_MINUTES": int(time_range.get("spinup_hours", 0)) * 60,
+        # Native restart files are the durable hand-off from ordinary WRF to
+        # the high-resolution ndown route.  Keep one restart per business hour.
+        "WRF_RESTART_INTERVAL_MINUTES": 60,
+        # The d04 native output is the parent for the WRF-LES chain.  Use the
+        # same 88-level vertical grid for new ordinary WRF tasks so ndown can
+        # preserve the high-resolution vertical contract.
+        "WRF_E_VERT": 88,
     }
     variable_prefix = "WRF_GFS" if data_source == "gfs" else "WRF_EC"
     environment[f"{variable_prefix}_DATE"] = forcing[f"{cache_prefix}_cycle_date"]

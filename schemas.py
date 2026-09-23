@@ -26,6 +26,8 @@ def normalize_task_request(request: dict) -> dict:
 class Center(BaseModel):
     lat: float = Field(ge=-90, le=90)
     lon: float = Field(ge=-180, le=180)
+    grid_x: float | None = Field(default=None, ge=1)
+    grid_y: float | None = Field(default=None, ge=1)
 
 
 class DomainConfig(BaseModel):
@@ -154,13 +156,17 @@ class WrfTaskCreate(BaseModel):
         if self.physics.cu_physics_by_domain is not None:
             if len(self.physics.cu_physics_by_domain) != len(self.domains):
                 raise ValueError("逐域积云方案数量必须与嵌套域数量一致")
-            if any(value < 0 for value in self.physics.cu_physics_by_domain):
-                raise ValueError("逐域积云方案不能为负数")
+            if any(value not in {0, 1, 2, 3, 5, 6, 7, 11, 14, 16, 93} for value in self.physics.cu_physics_by_domain):
+                raise ValueError("逐域积云方案包含不支持的编号")
         if self.physics.sf_urban_physics_by_domain is not None:
             if len(self.physics.sf_urban_physics_by_domain) != len(self.domains):
                 raise ValueError("逐域城市冠层方案数量必须与嵌套域数量一致")
             if any(value not in {0, 1} for value in self.physics.sf_urban_physics_by_domain):
                 raise ValueError("逐域城市冠层方案仅支持 0 或 1")
+            if 1 in self.physics.sf_urban_physics_by_domain and self.physics.sf_surface_physics not in {2, 4}:
+                raise ValueError("逐域 UCM 城市冠层仅支持 Noah 或 Noah-MP 陆面方案")
+        if self.data_source == "ecmwf" and self.forecast_interval_hours != 3:
+            raise ValueError("ECMWF 全球开放资料为 3 小时边界场，请选择 3 小时间隔")
         model_start = start - timedelta(hours=FIXED_SPINUP_HOURS)
         cycle_start = model_start.replace(hour=0, minute=0, second=0, microsecond=0)
         if (end - cycle_start).total_seconds() / 3600 + 6 > 72:
@@ -168,17 +174,21 @@ class WrfTaskCreate(BaseModel):
         outer = self.domains[0]
         meters_per_degree = 111_320.0
         longitude_scale = meters_per_degree * max(0.1, math.cos(math.radians(self.center.lat)))
+        if (self.center.grid_x is None) != (self.center.grid_y is None):
+            raise ValueError("网格参考点必须同时包含 x 和 y")
+        if (self.center.grid_x or 1) > outer.e_we or (self.center.grid_y or 1) > outer.e_sn:
+            raise ValueError("网格参考点必须位于 D01 内")
         half_width = (outer.e_we - 1) * outer.dx / longitude_scale / 2
         half_height = (outer.e_sn - 1) * outer.dy / meters_per_degree / 2
         safety_margin = 1.0
         west = self.center.lon - half_width - safety_margin
         east = self.center.lon + half_width + safety_margin
-        south = self.center.lat - half_height - safety_margin
-        north = self.center.lat + half_height + safety_margin
-        if west < 65 or east > 145 or south < 5 or north > 60:
-            raise ValueError(
-                f"D01（含 1° 边界缓冲）超出中国区域 {source_label} 覆盖范围：65°E–145°E、5°N–60°N"
-            )
+        reference_y = self.center.grid_y or (outer.e_sn + 1) / 2
+        south = self.center.lat - (reference_y - 1) * outer.dy / meters_per_degree - safety_margin
+        north = self.center.lat + (outer.e_sn - reference_y) * outer.dy / meters_per_degree + safety_margin
+        if south < -90 or north > 90:
+            raise ValueError("D01（含 1° 边界缓冲）不能越过极点；请缩小网格或调整中心纬度")
+        # Do not constrain longitudes: a valid global domain can cross the date line.
         return self
 
 

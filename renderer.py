@@ -199,6 +199,14 @@ def _align_output_times(
     return adjustments
 
 
+def _source_metadata(data_source: Any, cycle: str) -> dict[str, str]:
+    """Keep forcing provenance source-specific in the published manifest."""
+    source = str(data_source or "gfs").strip().lower()
+    if source in {"ec", "ecmwf"}:
+        return {"data_source": "ECMWF", "ecmwf_cycle": cycle}
+    return {"data_source": "GFS", "gfs_cycle": cycle}
+
+
 def render_run(
     task_id: str,
     raw_dir: Path,
@@ -325,17 +333,14 @@ def render_run(
         if item.get("name")
     ] if domains else []
     default_variable = "T2" if "T2" in default_variables else (default_variables[0] if default_variables else "")
-    source = str(task_request.get("data_source") or "gfs").strip().lower()
-    source_label = "ECMWF" if source in {"ec", "ecmwf"} else "GFS"
+    source_metadata = _source_metadata(task_request.get("data_source"), cycle)
     manifest = {
         "schema_version": "1.2",
         "image_format": "webp",
         "business_type": "WRF",
         "task_id": task_id,
-        "data_source": source_label,
         "forcing_cycle": cycle,
-        "gfs_cycle": cycle,
-        **({"ecmwf_cycle": cycle} if source_label == "ECMWF" else {}),
+        **source_metadata,
         "start_time": task_request["start_time"],
         "end_time": task_request["end_time"],
         "center": task_request["center"],

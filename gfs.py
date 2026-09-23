@@ -34,8 +34,10 @@ class GfsManager:
         data_source: str = "gfs",
     ) -> list[str]:
         self.normalize_source(data_source)
+        # Publication is determined by the pool's f072 probe, not a guessed
+        # fixed delay.  The queue keeps an unpublished current cycle in
+        # waiting_publish while the previous complete cycles remain usable.
         cursor = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        cursor -= timedelta(hours=self.settings.hpc_gfs_publication_lag_hours)
         cursor = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
         return [self.cycle_key(cursor - timedelta(days=index)) for index in range(max(1, count))]
 
@@ -46,13 +48,12 @@ class GfsManager:
         now: datetime | None = None,
         data_source: str = "gfs",
     ) -> tuple[str, list[int]]:
-        """选择已过发布缓冲且能够覆盖模拟窗口的最近 00Z。"""
+        """Select the nominal newest 00Z; the task manager verifies pool readiness."""
         source = self.normalize_source(data_source)
         start = start.astimezone(timezone.utc)
         end = end.astimezone(timezone.utc)
         requested_cycle = start.replace(hour=0, minute=0, second=0, microsecond=0)
         available_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        available_at -= timedelta(hours=self.settings.hpc_gfs_publication_lag_hours)
         latest_available_cycle = available_at.replace(hour=0, minute=0, second=0, microsecond=0)
         candidate = min(requested_cycle, latest_available_cycle)
         end_offset = int((end - candidate).total_seconds() // 3600) + 6
