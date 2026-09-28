@@ -511,12 +511,16 @@ class PoolQueue:
             pass
 
     def _write_manifest_if_complete(self, cycle: str) -> None:
-        files = []
         expected_hours = self.expected_hours()
-        for hour in expected_hours:
-            path = self.file_path(cycle, hour)
-            if not self.valid(path):
-                return
+        paths = [self.file_path(cycle, hour) for hour in expected_hours]
+        # Check the cheap GRIB head/tail invariant for the whole cycle before
+        # hashing anything.  Otherwise every retry of one missing forecast
+        # hour re-hashes all earlier multi-hundred-MB files and can starve a
+        # newly queued task behind an incomplete prefetch cycle.
+        if not all(self.valid(path) for path in paths):
+            return
+        files = []
+        for hour, path in zip(expected_hours, paths):
             files.append({"name": path.name, "forecast_hour": hour, "size": path.stat().st_size, "sha256": self.digest(path)})
         manifest = {
             "provider": self.source,

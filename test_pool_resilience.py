@@ -4,6 +4,7 @@ import unittest
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from config import Settings
 from hpc_transport import HpcClient
@@ -27,6 +28,19 @@ def queue_args(root: Path) -> Namespace:
 
 
 class PoolResilienceTest(unittest.TestCase):
+    def test_incomplete_cycle_does_not_hash_existing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            queue = queue_module.PoolQueue(queue_args(root))
+            first = queue.file_path("2026091200", 0)
+            first.parent.mkdir(parents=True)
+            first.write_bytes(b"GRIBpayload7777")
+
+            with patch.object(queue, "digest", side_effect=AssertionError("must not hash an incomplete cycle")):
+                queue._write_manifest_if_complete("2026091200")
+
+            self.assertFalse((first.parent / "manifest.json").exists())
+
     def test_failure_classification_distinguishes_transient_and_permanent_errors(self):
         queue = queue_module.PoolQueue(queue_args(Path(tempfile.gettempdir())))
         self.assertEqual(queue.classify_error(0, "curl: (6) Could not resolve host")[0], "network")
