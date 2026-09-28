@@ -437,6 +437,23 @@ class Chain:
                 items.append({"kind": "missing_driver_file", "name": str(path)})
         return hashlib.sha256(self._canonical(items)).hexdigest()
 
+    def _frozen_wps_checkpoint(self) -> Optional[str]:
+        """Return the frozen driver identity after raw GRIB lifecycle cleanup."""
+        try:
+            marker = json.loads(self._marker_path("wps_prepare").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        frozen = str(marker.get("input_inventory_sha256") or "")
+        if not frozen:
+            return None
+        if marker.get("contract_sha256") != self.contract_sha256:
+            return None
+        if marker.get("topology_sha256") != self.topology_sha256:
+            return None
+        if marker.get("run_dir") != str(self.root):
+            return None
+        return frozen if self._stage_outputs_valid("wps_prepare") else None
+
     def done(self, name: str) -> bool:
         path = self._marker_path(name)
         if not path.is_file():
@@ -611,6 +628,9 @@ class Chain:
         count = len(les_flags)
         return (
             f" hybrid_opt = 2, w_damping = 1, w_crit_cfl = 0.8, diff_opt = {csv(diff)}, km_opt = {csv(km)},\n"
+            f" epssm = {csv([0.1 if les else 0.0 for les in les_flags])}, "
+            f"diff_6th_opt = {csv([2 if les else 0 for les in les_flags])}, "
+            f"diff_6th_factor = {csv([0.12 if les else 0.12 for les in les_flags])},\n"
             f" mix_full_fields = {csv(['.true.'] * count)},\n"
             f" non_hydrostatic = {csv(['.true.'] * count)}, moist_adv_opt = {csv([2] * count)}, scalar_adv_opt = {csv([2] * count)}\n"
         )
@@ -664,6 +684,8 @@ class Chain:
             return
         data_dir, forecast_start = self._driver_cycle()
         if not data_dir.is_dir():
+            if self._frozen_wps_checkpoint():
+                return
             raise FileNotFoundError(f"驱动周期目录不存在: {data_dir}")
         for child in ("geogrid", "metgrid", "ungrib"):
             (self.wps / child).mkdir(parents=True, exist_ok=True)
@@ -828,9 +850,16 @@ class Chain:
 /
 """
 
-    def _wrf_namelist(self, target: Dict[str, Any], domain_index: int, restart_time: Optional[datetime] = None) -> str:
+    def _wrf_namelist(
+        self,
+        target: Dict[str, Any],
+        domain_index: int,
+        restart_time: Optional[datetime] = None,
+        time_step_scale: float = 1.0,
+    ) -> str:
         integer, numerator, denominator = self._high_time_step(domain_index)
-        requested_seconds = integer + numerator / denominator
+        requested_seconds = (integer + numerator / denominator) * time_step_scale
+        integer, numerator, denominator = self._fraction(requested_seconds)
         starting_bound, starting_denominator = self._adaptive_time_step_bound(requested_seconds)
         min_bound, min_denominator = self._adaptive_time_step_bound(requested_seconds / 4.0)
         max_bound, max_denominator = self._adaptive_time_step_bound(requested_seconds)
@@ -879,10 +908,20 @@ class Chain:
         self._write(directory / "wrf_les_iofields.txt", WRF_LES_IOFIELDS_TEXT)
 
     def _latest_restart(self, directory: Path) -> Optional[Tuple[datetime, Path]]:
-        # Never chain a second recovery from a checkpoint that already failed
-        # after being restored. Also reject checkpoints produced by the old
-        # adaptive d08 policy whose output-boundary jump caused the crash.
-        if (directory / "resume_from.json").exists():
+        # A numerically unstable d08 run may need more than one progressively
+        # smaller fixed-step recovery. Bound the chain to prevent endless
+        # retries while retaining completed simulation hours.
+        if self._resume_attempt(directory) >= 3:
+            return None
+        try:
+            identity = json.loads((directory / "wrf-run-identity.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if identity.get("wrf_binary_sha256") != self.binary_hashes.get("wrf.exe"):
+            return None
+        if identity.get("topology_sha256") != self.topology_sha256:
+            return None
+        if identity.get("fixed_time_step") is not True:
             return None
         try:
             namelist = (directory / "namelist.input").read_text(encoding="utf-8", errors="replace")
@@ -900,6 +939,14 @@ class Chain:
                 candidates.append((value, path))
         return max(candidates, default=None, key=lambda item: item[0])
 
+    @staticmethod
+    def _resume_attempt(directory: Path) -> int:
+        try:
+            value = json.loads((directory / "resume_from.json").read_text(encoding="utf-8"))
+            return max(0, int(value.get("attempt") or 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return 0
+
     def _parent_links(self, parent_dir: Path, parent_domain: int, ndown_dir: Path) -> None:
         pattern = f"wrfout_d{parent_domain:02d}_*" if parent_domain == 4 else "wrfout_d01_*"
         for source in sorted(parent_dir.glob(pattern)):
@@ -915,6 +962,7 @@ class Chain:
         wrf_name = {5: "wrf_d05_333m", 6: "wrf_d06_111m", 7: "wrf_d07_37m", 8: "wrf_d08_10m"}[child_domain]
         if not self.done(ndown_name):
             self._archive_incomplete(ndown_dir, ndown_name)
+        restart_attempt = self._resume_attempt(child_dir) if child_dir.is_dir() else 0
         restart_checkpoint = self._latest_restart(child_dir) if child_dir.is_dir() else None
         restart_archive = None
         if not self.done(wrf_name):
@@ -947,16 +995,34 @@ class Chain:
                 archived = restart_archive / original.name
                 if archived.is_file() and archived.stat().st_size > 0:
                     self._copy(archived, child_dir / archived.name)
-                    initial_history = restart_archive / f"wrfout_d01_{stamp(self.start)}"
-                    if initial_history.is_file() and initial_history.stat().st_size > 0:
-                        self._copy(initial_history, child_dir / initial_history.name)
+                    for history in sorted(restart_archive.glob("wrfout_d01_????-??-??_??:??:??")):
+                        try:
+                            history_time = datetime.strptime(history.name[-19:], "%Y-%m-%d_%H:%M:%S").replace(tzinfo=UTC)
+                        except ValueError:
+                            continue
+                        if history_time <= restart_time and history.is_file() and history.stat().st_size > 0:
+                            self._copy(history, child_dir / history.name)
+                    restart_attempt += 1
                     self._write(child_dir / "resume_from.json", json.dumps({
                         "schema_version": "wrf-les-resume/v1", "restart_time": iso(restart_time),
-                        "source": str(archived),
+                        "source": str(archived), "attempt": restart_attempt,
                     }, ensure_ascii=False, indent=2) + "\n")
                 else:
                     restart_time = None
-            self._write(child_dir / "namelist.input", self._wrf_namelist(child, child_domain, restart_time))
+            time_step_scale = 0.5 ** restart_attempt if child_domain == 8 else 1.0
+            self._write(
+                child_dir / "namelist.input",
+                self._wrf_namelist(child, child_domain, restart_time, time_step_scale=time_step_scale),
+            )
+            self._write(child_dir / "wrf-run-identity.json", json.dumps({
+                "schema_version": "wrf-les-run-identity/v1",
+                "domain": f"d{child_domain:02d}",
+                "wrf_binary_sha256": self.binary_hashes["wrf.exe"],
+                "topology_sha256": self.topology_sha256,
+                "fixed_time_step": child_domain == 8,
+                "time_step_scale": time_step_scale,
+                "restart_time": iso(restart_time) if restart_time else None,
+            }, ensure_ascii=False, indent=2) + "\n")
             self._run(child_dir, "wrf", ["mpirun", "-np", str(self.mpi), "./wrf.exe"])
             self._validate_wrf_stage_outputs(child_dir, child)
             self.mark(wrf_name)

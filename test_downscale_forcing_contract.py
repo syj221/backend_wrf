@@ -117,6 +117,8 @@ class ForcingContractTests(unittest.TestCase):
         self.assertIn("ghg_input = 0", physics)
         self.assertIn("w_damping = 1", dynamics)
         self.assertIn("w_crit_cfl = 0.8", dynamics)
+        self.assertIn("epssm = 0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.1, 0.1", dynamics)
+        self.assertIn("diff_6th_opt = 0, 0, 0, 0, 2, 2, 2, 2", dynamics)
         self.assertIn("mix_full_fields = .true., .true., .true., .true., .true., .true., .true., .true.", dynamics)
         self.assertIn("moist_adv_opt = 2, 2, 2, 2, 2, 2, 2, 2", dynamics)
         self.assertIn("scalar_adv_opt = 2, 2, 2, 2, 2, 2, 2, 2", dynamics)
@@ -137,6 +139,13 @@ class ForcingContractTests(unittest.TestCase):
         d08 = chain._wrf_namelist({"dx_m": 12.345679, "dy_m": 12.345679, "e_we": 127, "e_sn": 127}, 8)
         self.assertIn("use_adaptive_time_step = .false.", d08)
         self.assertIn("step_to_output_time = .false.", d08)
+        resumed_d08 = chain._wrf_namelist(
+            {"dx_m": 12.345679, "dy_m": 12.345679, "e_we": 127, "e_sn": 127},
+            8,
+            datetime(2026, 9, 15, 3, tzinfo=timezone.utc),
+            time_step_scale=0.5,
+        )
+        self.assertIn("time_step_fract_num = 31250", resumed_d08)
 
     def test_d08_resume_uses_latest_post_start_restart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,16 +153,52 @@ class ForcingContractTests(unittest.TestCase):
             chain = chain_module.Chain.__new__(chain_module.Chain)
             chain.start = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
             chain.end = datetime(2026, 9, 18, 18, tzinfo=timezone.utc)
+            chain.binary_hashes = {"wrf.exe": "current-wrf-sha256"}
+            chain.topology_sha256 = "current-topology-sha256"
             (root / "namelist.input").write_text(
                 "use_adaptive_time_step = .false., step_to_output_time = .false.,", encoding="utf-8"
             )
+            (root / "wrf-run-identity.json").write_text(json.dumps({
+                "wrf_binary_sha256": "current-wrf-sha256",
+                "topology_sha256": "current-topology-sha256",
+                "fixed_time_step": True,
+            }), encoding="utf-8")
             (root / "wrfrst_d01_2026-09-18_13:00:00").write_bytes(b"restart")
             (root / "wrfrst_d01_2026-09-18_12:00:00").write_bytes(b"initial")
             value, path = chain._latest_restart(root)
             self.assertEqual(value, datetime(2026, 9, 18, 13, tzinfo=timezone.utc))
             self.assertEqual(path.name, "wrfrst_d01_2026-09-18_13:00:00")
-            (root / "resume_from.json").write_text("{}", encoding="utf-8")
+            (root / "resume_from.json").write_text('{"attempt": 2}', encoding="utf-8")
+            self.assertIsNotNone(chain._latest_restart(root))
+            (root / "resume_from.json").write_text('{"attempt": 3}', encoding="utf-8")
             self.assertIsNone(chain._latest_restart(root))
+
+    def test_d08_resume_rejects_restart_from_replaced_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chain = chain_module.Chain.__new__(chain_module.Chain)
+            chain.start = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
+            chain.end = datetime(2026, 9, 18, 18, tzinfo=timezone.utc)
+            chain.binary_hashes = {"wrf.exe": "new-binary"}
+            chain.topology_sha256 = "topology"
+            (root / "namelist.input").write_text(
+                "use_adaptive_time_step = .false., step_to_output_time = .false.,", encoding="utf-8"
+            )
+            (root / "wrf-run-identity.json").write_text(json.dumps({
+                "wrf_binary_sha256": "old-binary",
+                "topology_sha256": "topology",
+                "fixed_time_step": True,
+            }), encoding="utf-8")
+            (root / "wrfrst_d01_2026-09-18_13:00:00").write_bytes(b"restart")
+            self.assertIsNone(chain._latest_restart(root))
+
+    def test_wps_resume_accepts_complete_frozen_checkpoint_after_grib_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            chain = chain_module.Chain.__new__(chain_module.Chain)
+            chain.done = lambda _name: False
+            chain._driver_cycle = lambda: (Path(directory) / "deleted-driver-cycle", 0)
+            chain._frozen_wps_checkpoint = lambda: "frozen-inventory-sha256"
+            chain.wps_prepare()
 
     def test_wrf_les_namelist_requires_runtime_turbulence_history_fields(self):
         chain = chain_module.Chain.__new__(chain_module.Chain)
