@@ -14,6 +14,9 @@ from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError
 from recommendations import RecommendationManager
+from static_access import allow_run_asset
+from domain_preview import DomainPreviewRequest, preview_domains
+from planning import PlanningAssessRequest, assess as assess_plan
 from schemas import (
     FIXED_SPINUP_HOURS,
     HpcAuthRequest,
@@ -37,6 +40,19 @@ gfs_manager = GfsManager(settings)
 hpc_client = HpcClient(settings)
 task_manager = WrfTaskManager(settings, store, gfs_manager, hpc_client)
 recommendation_manager = RecommendationManager(settings, hpc_client)
+
+
+def allow_wrf_asset(path: str, user: dict[str, Any]) -> bool:
+    """Only task owners may read unpublished run assets."""
+    def lookup(task_id: str) -> dict[str, Any] | None:
+        if task_id.startswith("ds_"):
+            return downscale_service.store.get(task_id)
+        try:
+            return task_manager.get(task_id)
+        except TaskNotFoundError:
+            return None
+
+    return allow_run_asset(path, user, lookup)
 
 
 def lookup_normal_wrf_task(task_id: str, owner_sub: str, owner_role: int) -> dict[str, Any] | None:
@@ -115,6 +131,7 @@ install_auth(
     app,
     [
         ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2}),
+        ("/api/wrf/submissions", {"GET": 1}),
         # 专业高分配置可由所有已登录 WRF 用户提交；资产与认证审核
         # 仍在 downscale router 内强制要求管理员角色。
         ("/api/wrf/downscale", {"GET": 1, "POST": 1, "DELETE": 1}),
@@ -125,10 +142,13 @@ install_auth(
         ("/api/wrf/recommendations", {"GET": 1, "*": 2}),
         ("/api/wrf/evidence", {"GET": 2, "POST": 2}),
         ("/api/wrf/options", {"GET": 1, "*": 2}),
+        ("/api/wrf/planning/assess", {"POST": 1}),
+        ("/api/wrf/domains/preview", {"POST": 1}),
         ("/api/wrf/hpc", 2),
         ("/api/wrf/display", 1),
         ("/data/WRF/", 1),
     ],
+    asset_authorizer=allow_wrf_asset,
 )
 
 app.add_middleware(
@@ -228,6 +248,8 @@ def options() -> dict[str, Any]:
                 "runtime_profiles": ["cpu"],
                 "default_runtime_profile": "cpu",
                 "fixed_spinup_hours": FIXED_SPINUP_HOURS,
+                "fixed_vertical_levels": 88,
+                "fixed_forecast_focus": "general",
                 "gfs_cycle_hours": [0],
                 "gfs_cycle_policy": "latest_covering_00z",
                 "gfs_product": "gfs-0p25-global",
@@ -255,6 +277,14 @@ def options() -> dict[str, Any]:
                 "downscale_runner_poll_seconds": settings.downscale_runner_poll_seconds,
             },
             "forecast_intervals": [1, 3, 6],
+            "history_intervals_minutes": [10, 30, 60, 180, 360],
+            "capability_version": "wrf-ordinary-2",
+            "field_descriptions": {
+                "forecast_interval_hours": "边界资料周期（小时），不是产品输出间隔。",
+                "history_interval_minutes": "模拟产品输出周期（分钟），全域统一。",
+                "center": "计算域参考点，需由用户确认。",
+                "domains": "d01–d04 嵌套域；子域网格距与父域比为 3 或 5。",
+            },
             "assimilation_schemes": [
                 {"value": "off", "label": "关闭"},
                 {"value": "fdda_weak", "label": "弱网格松弛"},
@@ -321,6 +351,19 @@ def data_status() -> dict[str, Any]:
         })
     except Exception as exc:
         return ok({"status": "unavailable", "mode": "tx_lab_remote_pool", "message": str(exc), "pool_items": []})
+
+
+@app.post("/api/wrf/planning/assess")
+def planning_assess(payload: PlanningAssessRequest) -> dict[str, Any]:
+    return ok(assess_plan(payload, task_manager.hpc_health))
+
+
+@app.post("/api/wrf/domains/preview")
+def domains_preview(payload: DomainPreviewRequest) -> dict[str, Any]:
+    try:
+        return ok(preview_domains(payload))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/wrf/forcing/prepare", status_code=202)
@@ -419,16 +462,18 @@ def trigger_remote_gfs(request: RemoteGfsTriggerRequest) -> dict[str, Any]:
 
 
 @app.post("/api/wrf/recommendations", status_code=202)
-def create_recommendation(request: WrfRecommendationRequest) -> dict[str, Any]:
+def create_recommendation(request: WrfRecommendationRequest, identity: Request) -> dict[str, Any]:
+    owner_sub, _ = _viewer(identity)
     return ok(
-        recommendation_manager.submit(request.model_dump(mode="json")),
+        recommendation_manager.submit(request.model_dump(mode="json"), owner_sub),
         message="已提交 tx-lab geogrid 地理分析",
     )
 
 
 @app.get("/api/wrf/recommendations/{job_id}")
-def recommendation_detail(job_id: str) -> dict[str, Any]:
-    job = recommendation_manager.get(job_id)
+def recommendation_detail(job_id: str, request: Request) -> dict[str, Any]:
+    owner_sub, role = _viewer(request)
+    job = recommendation_manager.get(job_id, owner_sub, role)
     if job is None:
         raise HTTPException(status_code=404, detail="WRF 参数推荐任务不存在")
     return ok(job)
@@ -488,6 +533,24 @@ def authenticate_hpc(request: HpcAuthRequest) -> dict[str, Any]:
 def list_tasks(request: Request, limit: int = 50) -> dict[str, Any]:
     owner_sub, role = _viewer(request)
     return ok({"items": task_manager.list(limit, None if role >= 3 else owner_sub), "queue_size": task_manager.queue_size})
+
+
+@app.get("/api/wrf/submissions/{key}")
+def submission_status(key: str, request: Request) -> dict[str, Any]:
+    """Read-only owner-bound reconciliation; never dispatches a WRF task."""
+    if not key or len(key) > 128 or not all(c.isalnum() or c in "-_" for c in key):
+        raise HTTPException(422, "幂等键格式无效")
+    owner_sub, _ = _viewer(request)
+    if not owner_sub:
+        raise HTTPException(401, "Token 缺少用户身份")
+    reservation = store.get_submission(owner_sub, key)
+    if reservation is None:
+        return ok({"status": "not_found", "task_id": None})
+    task = store.get(reservation["task_id"])
+    if task and task.get("owner_sub") == owner_sub:
+        return ok({"status": "accepted" if reservation["accepted"] else "reserved",
+                   "task_id": task["id"], "task_status": task["status"]})
+    return ok({"status": "task_deleted" if reservation["accepted"] else "reserved", "task_id": None})
 
 
 @app.get("/api/wrf/tasks/{task_id}")

@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from pyproj import CRS, Transformer
+from rasterio.enums import Resampling
+from rasterio.transform import array_bounds, from_origin
+from rasterio.warp import calculate_default_transform, reproject
 
 
 DISPLAY_VARIABLES = {
@@ -15,8 +19,8 @@ DISPLAY_VARIABLES = {
     "V10": {"label": "10 米 V 风", "fallback_unit": "m s-1", "palette": "diverging"},
     "PSFC": {"label": "地面气压", "fallback_unit": "Pa", "palette": "pressure"},
     "PBLH": {"label": "边界层高度", "fallback_unit": "m", "palette": "height"},
-    "RAINC": {"label": "积云降水", "fallback_unit": "mm", "palette": "rain"},
-    "RAINNC": {"label": "非积云降水", "fallback_unit": "mm", "palette": "rain"},
+    "RAINC": {"label": "积云累计降水", "fallback_unit": "mm", "palette": "rain"},
+    "RAINNC": {"label": "网格尺度累计降水", "fallback_unit": "mm", "palette": "rain"},
 }
 
 PALETTES = {
@@ -86,9 +90,11 @@ def _range(value: np.ndarray) -> tuple[float, float]:
     return float(low), float(high)
 
 
-def _rgba(value: np.ndarray, palette_name: str) -> tuple[np.ndarray, float, float]:
-    low, high = _range(value)
-    normalized = np.clip((value - low) / (high - low), 0, 1)
+def _rgba(value: np.ndarray, palette_name: str, low: float | None = None,
+          high: float | None = None) -> tuple[np.ndarray, float, float]:
+    if low is None or high is None:
+        low, high = _range(value)
+    normalized = np.where(np.isfinite(value), np.clip((value - low) / (high - low), 0, 1), 0)
     palette = np.asarray(PALETTES[palette_name], dtype=float)
     positions = normalized * (len(palette) - 1)
     left = np.floor(positions).astype(int)
@@ -97,6 +103,68 @@ def _rgba(value: np.ndarray, palette_name: str) -> tuple[np.ndarray, float, floa
     rgb = palette[left] * (1 - fraction) + palette[right] * fraction
     alpha = np.where(np.isfinite(value), 185, 0)[..., None]
     return np.flipud(np.concatenate([rgb, alpha], axis=-1).astype(np.uint8)), low, high
+
+
+def _footprint(lat: np.ndarray, lon: np.ndarray) -> dict[str, Any]:
+    top = [[float(lon[-1, j]), float(lat[-1, j])] for j in range(lon.shape[1])]
+    right = [[float(lon[i, -1]), float(lat[i, -1])] for i in range(lon.shape[0] - 2, -1, -1)]
+    bottom = [[float(lon[0, j]), float(lat[0, j])] for j in range(lon.shape[1] - 2, -1, -1)]
+    left = [[float(lon[i, 0]), float(lat[i, 0])] for i in range(1, lon.shape[0] - 1)]
+    ring = top + right + bottom + left
+    return {"type": "Polygon", "coordinates": [ring + [ring[0]]]}
+
+
+def _reproject_rgba(rgba: np.ndarray, lat: np.ndarray, lon: np.ndarray,
+                    dataset: Any) -> tuple[np.ndarray, list[float], float]:
+    """Map cell-centred WRF Lambert grid to a north-up Web Mercator raster."""
+    if int(getattr(dataset, "MAP_PROJ", 0)) != 1:
+        raise ValueError("当前普通 WRF 产品缺少受支持的 Lambert 投影元数据")
+    truelat1 = float(getattr(dataset, "TRUELAT1"))
+    truelat2 = float(getattr(dataset, "TRUELAT2", truelat1))
+    stand_lon = float(getattr(dataset, "STAND_LON"))
+    src_crs = CRS.from_proj4(
+        f"+proj=lcc +lat_1={truelat1} +lat_2={truelat2} "
+        f"+lat_0={truelat1} +lon_0={stand_lon} +R=6370000 +units=m +no_defs"
+    )
+    forward = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
+    x00, y00 = forward.transform(float(lon[0, 0]), float(lat[0, 0]))
+    x_end, _ = forward.transform(float(lon[0, -1]), float(lat[0, -1]))
+    _, y_end = forward.transform(float(lon[-1, 0]), float(lat[-1, 0]))
+    height, width = lat.shape
+    if width < 2 or height < 2:
+        raise ValueError("WRF 地理网格至少需要 2×2 个格点")
+    dx = (x_end - x00) / (width - 1)
+    dy = (y_end - y00) / (height - 1)
+    if dx <= 0 or dy <= 0:
+        raise ValueError("WRF 地理网格方向或分辨率无效")
+    expected_dx = float(getattr(dataset, "DX", dx))
+    expected_dy = float(getattr(dataset, "DY", dy))
+    if abs(dx - expected_dx) > max(1.0, expected_dx * 0.05) or abs(dy - expected_dy) > max(1.0, expected_dy * 0.05):
+        raise ValueError("WRF 经纬度网格与 DX/DY 投影尺度不一致")
+    x_corner, y_corner = forward.transform(float(lon[-1, -1]), float(lat[-1, -1]))
+    error = max(abs(x_corner - x_end), abs(y_corner - y_end))
+    if error > max(dx, dy) * 0.1:
+        raise ValueError("WRF 投影控制点偏差过大，禁止生成定位不可信的产品")
+    src_transform = from_origin(x00 - dx / 2, y_end + dy / 2, dx, dy)
+    src_bounds = array_bounds(height, width, src_transform)
+    dst_crs = CRS.from_epsg(3857)
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        src_crs.to_wkt(), dst_crs.to_wkt(), width, height, *src_bounds,
+    )
+    if dst_width < 1 or dst_height < 1 or dst_width * dst_height > 8 * width * height:
+        raise ValueError("WRF 投影重采样尺寸异常")
+    source = np.moveaxis(rgba, -1, 0)
+    destination = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+    for band in range(4):
+        reproject(source[band], destination[band],
+                  src_transform=src_transform, src_crs=src_crs.to_wkt(),
+                  dst_transform=dst_transform, dst_crs=dst_crs.to_wkt(),
+                  resampling=Resampling.nearest if band == 3 else Resampling.bilinear)
+    west, south, east, north = array_bounds(dst_height, dst_width, dst_transform)
+    inverse = Transformer.from_crs(dst_crs, "EPSG:4326", always_xy=True)
+    geo_west, geo_south = inverse.transform(west, south)
+    geo_east, geo_north = inverse.transform(east, north)
+    return np.moveaxis(destination, 0, -1), [geo_west, geo_south, geo_east, geo_north], error
 
 
 def validate_wrfout_files(raw_dir: Path) -> dict[str, Any]:
@@ -228,6 +296,20 @@ def render_run(
     sources = validation["valid"]
     if not sources:
         raise RuntimeError("未找到可渲染的 wrfout 文件")
+    # Keep one scale per domain/variable so animation colours remain comparable.
+    display_ranges: dict[tuple[str, str], tuple[float, float]] = {}
+    for source in sources:
+        with Dataset(str(source)) as dataset:
+            domain = _domain(source, dataset)
+            for name in DISPLAY_VARIABLES:
+                if name not in dataset.variables:
+                    continue
+                low, high = _range(_surface(dataset, name))
+                previous = display_ranges.get((domain, name))
+                display_ranges[(domain, name)] = (
+                    min(low, previous[0]) if previous else low,
+                    max(high, previous[1]) if previous else high,
+                )
     for source in sources:
         with Dataset(str(source)) as dataset:
             domain = _domain(source, dataset)
@@ -242,6 +324,8 @@ def render_run(
                     "dy": float(getattr(dataset, "DY", 0.0) or 0.0),
                     "grid": [int(lon.shape[1]), int(lat.shape[0])],
                     "extent": extent,
+                    "footprint": _footprint(lat, lon),
+                    "geolocation": {"status": "reprojected", "source": "XLAT/XLONG + WRF Lambert metadata", "target_crs": "EPSG:3857"},
                     "times": [],
                     "variables": {},
                 },
@@ -252,7 +336,13 @@ def render_run(
                 if name not in dataset.variables:
                     continue
                 value = _surface(dataset, name)
-                rgba, low, high = _rgba(value, definition["palette"])
+                stable_low, stable_high = display_ranges[(domain, name)]
+                rgba, low, high = _rgba(value, definition["palette"], stable_low, stable_high)
+                rgba, image_extent, control_error = _reproject_rgba(rgba, lat, lon, dataset)
+                domain_item["geolocation"]["max_control_error_m"] = max(
+                    float(domain_item["geolocation"].get("max_control_error_m") or 0), control_error,
+                )
+                domain_item["extent"] = image_extent
                 stamp = re.sub(r"[^0-9]", "", time_label)[:14] or source.name[-19:].replace(":", "").replace("_", "")
                 relative = Path("runs") / task_id / "rendered" / domain / name / f"{stamp}.webp"
                 target = output_dir.parents[1] / relative
@@ -266,6 +356,8 @@ def render_run(
                         "label": definition["label"],
                         "units": str(getattr(variable, "units", definition["fallback_unit"])),
                         "description": str(getattr(variable, "description", definition["label"])),
+                        "palette": [list(color) for color in PALETTES[definition["palette"]]],
+                        "display_range": [low, high],
                         "frames": [],
                     },
                 )
@@ -295,7 +387,7 @@ def render_run(
     cursor = start
     while cursor <= end:
         expected_times.append(cursor.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
-        cursor += timedelta(hours=1)
+        cursor += timedelta(minutes=int(task_request.get("history_interval_minutes") or 60))
     time_tolerance_seconds = _output_time_tolerance_seconds(task_request, domains)
     time_adjustments = _align_output_times(domains, expected_times, time_tolerance_seconds)
     missing_by_domain: dict[str, list[str]] = {}
@@ -335,7 +427,7 @@ def render_run(
     default_variable = "T2" if "T2" in default_variables else (default_variables[0] if default_variables else "")
     source_metadata = _source_metadata(task_request.get("data_source"), cycle)
     manifest = {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "image_format": "webp",
         "business_type": "WRF",
         "task_id": task_id,
@@ -343,6 +435,7 @@ def render_run(
         **source_metadata,
         "start_time": task_request["start_time"],
         "end_time": task_request["end_time"],
+        "history_interval_minutes": int(task_request.get("history_interval_minutes") or 60),
         "center": task_request["center"],
         "default_domain": domains[-1]["id"],
         "default_variable": default_variable,
@@ -355,6 +448,11 @@ def render_run(
             "missing_times": missing_by_domain,
             "time_tolerance_seconds": time_tolerance_seconds,
             "time_adjustments": time_adjustments,
+            "geolocation": "reprojected",
+            "limitations": [
+                "WebP 已从 WRF 网格重投影至 EPSG:3857；统计值来自原始网格，图像为展示重采样。",
+                "RAINC/RAINNC 是运行累计降水（mm），不能直接解释为单个输出间隔降水量或降水强度。",
+            ],
         },
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }

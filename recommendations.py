@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -33,14 +34,33 @@ class RecommendationManager:
         self.hpc = hpc
         self.cache_dir = settings.data_dir / "recommendations"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.jobs_path = self.cache_dir / "jobs.sqlite3"
         self._lock = threading.RLock()
+        with sqlite3.connect(self.jobs_path) as connection:
+            connection.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL, payload TEXT NOT NULL)")
+            stored = connection.execute("SELECT id, payload FROM jobs").fetchall()
         self._jobs: dict[str, dict[str, Any]] = {}
+        for job_id, payload in stored:
+            job = json.loads(payload)
+            if job.get("status") in {"queued", "pending", "running", "analyzing_geography"}:
+                job.update(status="interrupted", error="服务重启中断了地理分析；可重新发起推荐。", updated_at=_utc_now())
+                self._persist(job)
+            self._jobs[job_id] = job
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wrf-recommend")
+
+    def _persist(self, job: dict[str, Any]) -> None:
+        with sqlite3.connect(self.jobs_path) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO jobs (id, owner_sub, payload) VALUES (?, ?, ?)",
+                (job["id"], job["owner_sub"], json.dumps(job, ensure_ascii=False)),
+            )
 
     def stop(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=False)
 
-    def submit(self, request: dict[str, Any]) -> dict[str, Any]:
+    def submit(self, request: dict[str, Any], owner_sub: str) -> dict[str, Any]:
+        if not owner_sub:
+            raise ValueError("推荐任务缺少用户身份")
         geometry = {"center": request["center"], "domains": request["domains"]}
         geography_fingerprint = _digest(geometry)
         recommendation_fingerprint = _digest({"version": RECOMMENDATION_VERSION, "request": request})
@@ -52,6 +72,7 @@ class RecommendationManager:
             cached = None
         job = {
             "id": job_id,
+            "owner_sub": owner_sub,
             "status": "succeeded" if isinstance(cached, dict) else "queued",
             "fingerprint": recommendation_fingerprint,
             "geography_fingerprint": geography_fingerprint,
@@ -61,18 +82,26 @@ class RecommendationManager:
         }
         with self._lock:
             self._jobs[job_id] = job
+            self._persist(job)
         if cached is None:
             self._pool.submit(self._run, job_id, request, cache_path)
-        return dict(job)
+        return self._public(job)
 
-    def get(self, job_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _public(job: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in job.items() if key != "owner_sub"}
+
+    def get(self, job_id: str, owner_sub: str | None = None, role: int = 0) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
-            return json.loads(json.dumps(job, ensure_ascii=False)) if job else None
+            if not job or (owner_sub is not None and role < 3 and job["owner_sub"] != owner_sub):
+                return None
+            return json.loads(json.dumps(self._public(job), ensure_ascii=False))
 
     def _update(self, job_id: str, **values: Any) -> None:
         with self._lock:
             self._jobs[job_id].update(values, updated_at=_utc_now())
+            self._persist(self._jobs[job_id])
 
     def _run(self, job_id: str, request: dict[str, Any], cache_path: Path) -> None:
         self._update(job_id, status="analyzing_geography")
@@ -80,12 +109,12 @@ class RecommendationManager:
             job = self.get(job_id) or {}
             geography = self.hpc.analyze_geography(job["geography_fingerprint"], request)
             result = self._recommend(request, geography)
-            temporary = cache_path.with_suffix(".json.tmp")
+            temporary = cache_path.with_name(f"{cache_path.name}.{job_id}.tmp")
             temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temporary, cache_path)
             self._update(job_id, status="succeeded", result=result, error=None)
         except Exception as exc:
-            self._update(job_id, status="failed", error=str(exc))
+            self._update(job_id, status="failed", error="地理分析未成功，请检查运行环境或稍后重试。")
 
     @staticmethod
     def _recommend(request: dict[str, Any], geography: dict[str, Any]) -> dict[str, Any]:
@@ -187,7 +216,8 @@ class RecommendationManager:
                 "max_urban_fraction": max_urban,
                 "finest_dx_m": min(int(item["dx"]) for item in domains),
             },
-            "confidence": 0.9 if len(geo_domains) == len(domains) else 0.78,
+            "evidence_status": "rule_based_unverified_for_case",
+            "applicability": "规则化物理配置起点；未经过该个例预报技巧检验。",
             "reasons": reasons,
             "warnings": warnings,
         }

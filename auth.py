@@ -6,7 +6,7 @@ import hmac
 import json
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from fastapi.responses import JSONResponse
@@ -49,7 +49,11 @@ def _required_role(path: str, method: str, rules: list[tuple[str, Any]]) -> int 
     return None
 
 
-def install_auth(app, rules: Iterable[tuple[str, Any]]) -> None:
+def install_auth(
+    app,
+    rules: Iterable[tuple[str, Any]],
+    asset_authorizer: Callable[[str, dict], bool] | None = None,
+) -> None:
     ordered = list(rules)
 
     @app.middleware("http")
@@ -70,5 +74,8 @@ def install_auth(app, rules: Iterable[tuple[str, Any]]) -> None:
             return JSONResponse({"code": 401, "detail": "token 无效或已过期"}, status_code=401)
         if int(payload.get("role", 0)) < required:
             return JSONResponse({"code": 403, "detail": "权限不足"}, status_code=403)
+        if asset_authorizer and path.startswith("/data/WRF/"):
+            if not asset_authorizer(path, payload):
+                return JSONResponse({"code": 404, "detail": "资源不存在或不可访问"}, status_code=404)
         request.state.user = payload
         return await call_next(request)

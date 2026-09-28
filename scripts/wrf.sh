@@ -1531,13 +1531,27 @@ step4_wrf_running() {
     WRF_FORECAST_FILE_INTERVAL_HOURS=${WRF_FORECAST_FILE_INTERVAL_HOURS:-${WRF_GFS_FILE_INTERVAL_HOURS:-${WRF_EC_FILE_INTERVAL_HOURS:-6}}}
     WRF_INTERVAL_SECONDS=$((10#$WRF_FORECAST_FILE_INTERVAL_HOURS * 3600))
     CFL_TIME_STEP=$((5 * DX_OUTER_KM))
-    TIME_STEP=$(select_time_step_for_forcing "$WRF_DX" "$WRF_INTERVAL_SECONDS")
+    WRF_HISTORY_INTERVAL_MINUTES=${WRF_HISTORY_INTERVAL_MINUTES:-60}
+    if ! [[ "$WRF_HISTORY_INTERVAL_MINUTES" =~ ^(10|30|60|180|360)$ ]]; then
+        log_error "无效的 WRF 输出间隔: $WRF_HISTORY_INTERVAL_MINUTES 分钟"
+        return 1
+    fi
+    local alignment_seconds=$((WRF_HISTORY_INTERVAL_MINUTES * 60))
+    local divisor=$WRF_INTERVAL_SECONDS
+    local remainder
+    while [ "$alignment_seconds" -ne 0 ]; do
+        remainder=$((divisor % alignment_seconds))
+        divisor=$alignment_seconds
+        alignment_seconds=$remainder
+    done
+    alignment_seconds=$divisor
+    TIME_STEP=$(select_time_step_for_forcing "$WRF_DX" "$alignment_seconds")
     if [ "$TIME_STEP" -lt "$CFL_TIME_STEP" ]; then
         log_info "外层分辨率: ${WRF_DX}m, 原始 CFL 时间步=${CFL_TIME_STEP}s；${WRF_FORECAST_FILE_INTERVAL_HOURS}小时驱动间隔要求整除，采用 time_step=${TIME_STEP}s"
     else
         log_info "外层分辨率: ${WRF_DX}m, time_step: ${TIME_STEP}s (5×${DX_OUTER_KM}km)，可整除 ${WRF_FORECAST_FILE_INTERVAL_HOURS}小时驱动间隔"
     fi
-    OUTPUT_INTERVAL_SECONDS=3600
+    OUTPUT_INTERVAL_SECONDS=$((WRF_HISTORY_INTERVAL_MINUTES * 60))
     if [ $((OUTPUT_INTERVAL_SECONDS % TIME_STEP)) -eq 0 ]; then
         log_info "输出时次检查: ${OUTPUT_INTERVAL_SECONDS}s 可被 time_step=${TIME_STEP}s 整除"
     else
@@ -1561,7 +1575,7 @@ step4_wrf_running() {
     WRF_END_DAYS=$(csv_repeat "${END_DAY}")
     WRF_END_HOURS=$(csv_repeat "${END_HOUR}")
     WRF_BOOL_TRUE=$(csv_repeat ".true.")
-    WRF_HISTORY=$(csv_repeat "60")
+    WRF_HISTORY=$(csv_repeat "$WRF_HISTORY_INTERVAL_MINUTES")
     WRF_HISTORY_BEGIN=$(csv_repeat "${WRF_HISTORY_BEGIN_MINUTES:-0}")
     WRF_E_WE=$(csv_join_domains WRF_E_WE 100)
     WRF_E_SN=$(csv_join_domains WRF_E_SN 80)

@@ -101,7 +101,7 @@ python main.py
 - `WRF_HPC_CPU_MPI_PROCESSES`：默认 `4`。
 - CPU 构建根目录中的可执行文件统一取自标准位置 `main/real.exe` 与 `main/wrf.exe`，不依赖 `run/` 软链接。
 - 新建和重跑接口不再接收运行配置、预报关注点与 spin-up 选项；后端统一持久化为 CPU、通用预报和 6 小时 spin-up。
-- 普通 WRF 业务任务默认每 60 分钟写出 `wrfrst_d*`，并保留同一时段的 `wrfout_d*`。高分任务提交时按权限核对普通任务的最细域为 1 km，再通过远端原生文件清单完成交接；仅有 WebP、`scene.meta.json` 或任务数据库记录不能作为高分初始化场。
+- 普通 WRF 业务任务默认每 60 分钟写出 `wrfrst_d*`；`wrfout_d*` 的 `history_interval_minutes` 独立于资料边界周期，可选 10/30/60/180/360 分钟（默认 60）。高分任务提交时按权限核对普通任务的最细域为 1 km，再通过远端原生文件清单完成交接；仅有 WebP、`scene.meta.json` 或任务数据库记录不能作为高分初始化场。
 - 高分任务由本机 `downscale/runner.py` 串行调度，远端入口为 `scripts/wrf_hpc_downscale.sh`。完整链路提交时自动创建或复用固定 27 km→9 km→3 km→1 km 普通 WRF 上游，并先检查 d04 原生 `wrfout/wrfrst`；随后由 `wrf_hpc_downscale_chain.py` 按 `WPS → real → d04→d05→d06→d07→d08 的 NDOWN/WRF-LES` 重建 12.345679 m forcing。forcing 时次由任务起止时间按小时闭区间生成（默认 48 小时即 49 个时次），每一步在任务专属目录写入绑定合同、拓扑、输入清单和二进制校验的 `.done` 标记，服务重启后只恢复完全匹配的阶段；历史 34.293556 m forcing 仅保留为兼容资产。
 - 第二阶段从已通过质量门的 forcing 任务结果页创建，使用 `upstream_mode=reuse_10m` 和 `source_forcing_task_id`。`wrf_hpc_cfd_10m_chain.py` 会按同一任务的动态时间窗口重新核对 d08 manifest、文件大小/SHA-256/修改时间、TKE/QKE 和数据盘路径，再按 RANS 独立快照或 LES 有限统计时段建立独立 OpenFOAM case；产品只发布 1 m 采样的 CF-NetCDF、GeoTIFF、VTK 和轻量浏览图层，不声明连续 1 m 预报。旧 34 m CFD 链路继续由 `wrf_hpc_cfd_chain.py` 兼容处理。
 - `WRF_DOWNSCALE_RUN_CHAIN` 由后端远端启动命令固定设置为 `true`；仅做源文件预检时不设置该变量，入口会在交接检查后退出，不会启动高分计算。
@@ -121,3 +121,12 @@ python main.py
 同步最新 00Z 或任务准备数据时，系统会立即清理不再可恢复的失败/空周期残留；完整旧周期在完整回退窗口之外自动清理。目标周期、下载中的周期、完整回退周期以及活动任务正在使用的周期不会自动删除；不满足自动清理条件的路径仍需在界面人工确认。远端任务断点、wrfout、历史运行结果和本地已发布产品始终保留，取消或重跑任务也不会删除这些数据。
 
 生产反向代理应将 `/api/wrf` 与 `/data/WRF` 转发到本服务。GFS、wrfout、WebP 结果及密钥不得提交到 Git。
+
+### 普通 WRF 规划、输出与权限合同（本地实现；生产计算待验收）
+
+2026-09-28 本地回归增加四层域独立球面 Lambert 控制点、逐层拖动/重画吸附及越界拒绝、分钟级目录时间与时间步整除测试；文献证据只返回来源文件名，不返回宿主机目录。跨仓库验收证据与真实计算门禁见 `../weather_agentscope/docs/WRF_ACCEPTANCE.md`。合成 fixture 和 Stub 不代表真实预报能力。
+
+- `GET /api/wrf/options` 返回能力版本、字段说明和固定策略；`POST /api/wrf/planning/assess` 只读评估部分需求，有 AOI/网格距时可给当前、较粗、较细最多三项规模对照，替代项必须由用户选择、不自动降低要求；可按显式 `evidence_query` 检索离线 `KnowledgeStore` 并标记文献核验状态（未导入则返回不可用）；`POST /api/wrf/domains/preview` 按 WPS Lambert 投影计算域轮廓，均不启动资料下载或 geogrid。资源耗时/内存无校准数据时返回未知。
+- `POST /api/wrf/tasks/validate` 仍是参数最终权威。`POST /api/wrf/tasks` 使用稳定 `Idempotency-Key`；响应不明时用本人可见的 `GET /api/wrf/submissions/{key}` 只读对账，不自动重复提交。
+- 推荐任务绑定用户并持久化；服务重启会将中断的分析标记为 `interrupted`，不会自动重跑。直接 `/data/WRF/runs/<task_id>/...` 只对本人或管理员开放。正式共享产品交由 `backend_system` 已登记发布目录提供。
+- 新渲染协议 `scene.meta.json` 1.3 使用 `pyproj`/`rasterio` 按 WRF 经纬度网格和投影元数据重投影至 Web Mercator；同一域/变量跨时次共享色标，原网格统计与展示重采样分离。服务显式传递 `ref_x/ref_y`（未指定时取自身既有网格中心策略），投影预览与运行使用同一参考点。`RAINC/RAINNC` 按 WRF 官方定义为累计降水，不把单帧数值当作间隔雨量。旧产品不自动重渲染，客户端须标明旧版定位局限。合成网格测试只验证实现，不证明预报准确率。

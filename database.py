@@ -98,6 +98,14 @@ class TaskStore:
         with self._lock, self._db:
             self._db.execute("UPDATE wrf_submissions SET accepted=1 WHERE owner_sub=? AND submission_key=?", (owner, key))
 
+    def get_submission(self, owner: str, key: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT task_id, accepted FROM wrf_submissions WHERE owner_sub=? AND submission_key=?",
+                (owner, key),
+            ).fetchone()
+        return dict(row) if row else None
+
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:

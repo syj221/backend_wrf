@@ -71,8 +71,9 @@ def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: dat
                 url = str(frame.get("url") or "")
                 valid_time = _parse_time(frame.get("time"))
                 forecast_hour = None
-                if reference_time and valid_time:
-                    forecast_hour = int(round((valid_time - reference_time).total_seconds() / 3600))
+                lead_seconds = int((valid_time - reference_time).total_seconds()) if reference_time and valid_time else None
+                if lead_seconds is not None and lead_seconds % 3600 == 0:
+                    forecast_hour = lead_seconds // 3600
                 identity = f"{task_id}|{domain_id}|{name}|{frame.get('time')}|{url}"
                 height_agl_m = frame.get("height_agl_m", domain.get("height_agl_m"))
                 rows.append({
@@ -103,7 +104,7 @@ def _asset_rows(file_uuid: str, task_id: str, manifest: dict[str, Any], now: dat
                     "missing_ratio": None,
                     "is_default": name == manifest.get("default_variable") and frame_index == 0,
                     "asset_status": "ready",
-                    "extra_json": json.dumps({"source_origin": "workbench", "source_task_id": task_id, "product_semantics": manifest.get("product_semantics"), "snapshot_id": frame.get("snapshot_id"), "selection_reason": frame.get("selection_reason"), "height_agl_m": height_agl_m}, ensure_ascii=False),
+                    "extra_json": json.dumps({"source_origin": "workbench", "source_task_id": task_id, "product_semantics": manifest.get("product_semantics"), "snapshot_id": frame.get("snapshot_id"), "selection_reason": frame.get("selection_reason"), "height_agl_m": height_agl_m, "forecast_lead_seconds": lead_seconds}, ensure_ascii=False),
                     "domain": domain_id,
                     "forecast_reference_time": reference_time,
                     "forecast_hour": None if highres_semantics else forecast_hour,
@@ -149,7 +150,7 @@ def _register_catalog(
         values = {
             "user_uuid": owner_uuid,
             "acquisition_type": "manual_import",
-            "visibility": "private" if owner_uuid else "public",
+            "visibility": "public",
             "data_type": "WRF",
             "file_type": "WEBP",
             "original_file_name": f"workbench_{task_id}",

@@ -126,12 +126,14 @@ class WrfTaskManager:
 
     def authenticate_hpc(self, password: str) -> dict[str, Any]:
         self._health = self.hpc.authenticate_password(password)
+        self._health["sampled_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if self._health.get("status") == "ready":
             self._resume_paused_tasks()
         return self.hpc_health
 
     def _check_health(self) -> None:
         self._health = self.hpc.health()
+        self._health["sampled_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if self._health.get("status") == "ready":
             self._resume_paused_tasks()
 

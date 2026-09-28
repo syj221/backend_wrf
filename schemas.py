@@ -86,6 +86,7 @@ class WrfTaskCreate(BaseModel):
     end_time: datetime
     center: Center
     forecast_interval_hours: Literal[1, 3, 6] = 1
+    history_interval_minutes: Literal[10, 30, 60, 180, 360] = 60
     domains: list[DomainConfig]
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
     assimilation_scheme: Literal["off", "fdda_weak", "fdda_standard", "fdda_strong"] = "off"
@@ -113,6 +114,10 @@ class WrfTaskCreate(BaseModel):
             raise ValueError("模拟时间跨度不能超过 30 天")
         if (end - start).total_seconds() < self.forecast_interval_hours * 3600:
             raise ValueError(f"{source_label} 文件间隔不能大于模拟时长")
+        if (end - start).total_seconds() < self.history_interval_minutes * 60:
+            raise ValueError("结果输出间隔不能大于模拟时长")
+        if (end - start).total_seconds() % (self.history_interval_minutes * 60):
+            raise ValueError("模拟时长必须是结果输出间隔的整数倍")
         if any(value.minute or value.second or value.microsecond for value in (start, end)):
             raise ValueError("WRF 开始和结束时间必须为 UTC 整点")
         if start.hour % self.forecast_interval_hours or end.hour % self.forecast_interval_hours:
