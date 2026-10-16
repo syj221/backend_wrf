@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+.venv/
+.runtime.env
 data/runs/
 data/*.sqlite3
 data/*.sqlite3-*

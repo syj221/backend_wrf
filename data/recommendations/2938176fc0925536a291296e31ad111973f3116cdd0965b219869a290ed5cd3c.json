@@ -1,0 +1,68 @@
+{
+  "fingerprint": "2938176fc0925536a291296e31ad111973f3116cdd0965b219869a290ed5cd3c",
+  "version": "2026.08-geography-season-v3",
+  "generated_at": "2026-10-08T07:31:46.353518Z",
+  "physics": {
+    "preset": "冷季降雪 / 混合相态",
+    "mp_physics": 16,
+    "cu_physics": 1,
+    "cu_physics_by_domain": [
+      1
+    ],
+    "ra_lw_physics": 4,
+    "ra_sw_physics": 4,
+    "bl_pbl_physics": 2,
+    "sf_sfclay_physics": 2,
+    "sf_surface_physics": 2,
+    "sf_urban_physics": 0,
+    "sf_urban_physics_by_domain": [
+      0
+    ],
+    "num_soil_layers": 4,
+    "num_land_cat": 21,
+    "radt": 15
+  },
+  "assimilation_scheme": "fdda_standard",
+  "geography": {
+    "fingerprint": "d927c58c7d7b5d00e594f489ef2a067dde1a573d0c525bf2ecb07c4bedd4f882",
+    "source": "hpc_wps_geogrid",
+    "domains": [
+      {
+        "domain": "d01",
+        "terrain_mean_m": 522.701095,
+        "terrain_max_m": 2109.51,
+        "terrain_std_m": 565.915786,
+        "terrain_range_m": 2109.51,
+        "land_fraction": 0.740871,
+        "water_fraction": 0.259129,
+        "urban_fraction": 0.010885
+      }
+    ],
+    "remote_cache": "/home/tx-lab/.wrf-data/WRFwork/RUNTIME/backend_wrf_geo/d927c58c7d7b5d00e594f489ef2a067dde1a573d0c525bf2ecb07c4bedd4f882"
+  },
+  "factors": {
+    "latitude": 36.042522440306925,
+    "month": 10,
+    "season": "冷季",
+    "complex_terrain": true,
+    "coastal": true,
+    "max_water_fraction": 0.259129,
+    "max_urban_fraction": 0.010885,
+    "finest_dx_m": 27000
+  },
+  "evidence_status": "rule_based_unverified_for_case",
+  "applicability": "规则化物理配置起点；未经过该个例预报技巧检验。",
+  "reasons": [
+    "中心纬度 36.04°、起报月份 10 月，判定为冷季；据此选择微物理 16。",
+    "geogrid 地形最高约 2110 m、起伏 2110 m、标准差 566 m；边界层/近地层采用 2/2。",
+    "区域最大水体比例 26%、城市比例 1%；城市冠层按逐域城市比例和网格距设置。",
+    "积云参数按网格距逐域设置为 [1]：≥10 km 参数化、3–10 km 尺度感知、≤3 km 显式对流。",
+    "当前任务固定采用 6 小时 spin-up；根据最细网格设置辐射调用间隔 15 分钟。",
+    "网格松弛仅作用于固定 spin-up 时段的 ≥9 km 粗网格，且不松弛水汽和边界层。",
+    "geogrid 显示复杂地形；当前阶段仍使用统一 6 小时 spin-up，建议结合历史个例评估初始调整噪声。",
+    "嵌套域同时包含显著陆地和水体，方案保留 Noah 陆面过程并强调近地层陆海差异。"
+  ],
+  "warnings": [
+    "该方案是规则化起点，不代表对个例最优；正式业务应通过历史个例回报检验。"
+  ]
+}

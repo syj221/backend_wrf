@@ -1,0 +1,987 @@
+{
+  "source_sha256": "be3286501f29190d9cf1e9e48a908e36d8fc24ceec5a3a668291c374934eef67",
+  "cases": [
+    {
+      "args": [
+        1,
+        12,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        12,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        12,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        20,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        20,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        20,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "dz above fixed eta levels is too large",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        30,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        30,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        30,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        32,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        32,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        32,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        33,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        33,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        33,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        34,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        34,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        34,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        40,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Add more levels to namelist.input for e_vert",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        1,
+        40,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        40,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        55,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        55,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        55,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        88,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        88,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        88,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        150,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        150,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        1,
+        150,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        12,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        12,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        12,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        20,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        20,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        20,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        30,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        30,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        30,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        32,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        32,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Upper levels may be too thick",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        32,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        33,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        33,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        33,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        34,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        34,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        34,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        40,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Upper levels may be too thick",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        40,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        40,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        55,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        55,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        55,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        88,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        88,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        88,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        150,
+        500,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        150,
+        5000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        150,
+        20000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        20,
+        5000,
+        2000,
+        100,
+        1.5,
+        1.2
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        20,
+        5000,
+        200,
+        1000,
+        1.3,
+        1.1
+      ],
+      "exit_code": 11,
+      "fatal": "Upper levels may be too thick",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        20,
+        80000,
+        1000,
+        50,
+        1.3,
+        1.1
+      ],
+      "exit_code": 0,
+      "fatal": null,
+      "ready": true,
+      "stderr": ""
+    },
+    {
+      "args": [
+        2,
+        40,
+        5000,
+        1000,
+        50,
+        1,
+        1
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    },
+    {
+      "args": [
+        2,
+        88,
+        5000,
+        1000,
+        50,
+        0.9,
+        0.9
+      ],
+      "exit_code": 11,
+      "fatal": "not enough eta levels to reach p_top",
+      "ready": false,
+      "stderr": "STOP 11\n"
+    }
+  ],
+  "algorithm_source_sha256": "964b81a1d3042a89af80407510962a37f695e833e4d37ddec1fa7bf88be9471b",
+  "source_anchor": "/home/tx-lab/WRF_WORKBENCH/releases/ordinary-20261008-04/wrf",
+  "compiler_flags": [
+    "-ffree-line-length-none",
+    "-fcheck=bounds",
+    "-O0"
+  ]
+}

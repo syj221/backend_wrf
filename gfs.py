@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 
 from config import Settings
 
 
 FORECAST_MAX_HOUR = 72
+LEGACY_BOUNDARY_BUFFER_HOURS = 6
+
+
+def boundary_buffer_hours(configuration_profile: str | None) -> int:
+    """Only ui-2 removes the historical extra six-hour boundary window."""
+    return 0 if configuration_profile == "wrf-ordinary-ui-2" else LEGACY_BOUNDARY_BUFFER_HOURS
+
+
+def _check_buffer(buffer_hours: int) -> None:
+    if type(buffer_hours) is not int or buffer_hours < 0:
+        raise ValueError("边界缓冲须为非负整数小时")
 
 
 class GfsManager:
@@ -47,16 +59,19 @@ class GfsManager:
         end: datetime,
         now: datetime | None = None,
         data_source: str = "gfs",
+        *,
+        buffer_hours: int = LEGACY_BOUNDARY_BUFFER_HOURS,
     ) -> tuple[str, list[int]]:
         """Select the nominal newest 00Z; the task manager verifies pool readiness."""
         source = self.normalize_source(data_source)
+        _check_buffer(buffer_hours)
         start = start.astimezone(timezone.utc)
         end = end.astimezone(timezone.utc)
         requested_cycle = start.replace(hour=0, minute=0, second=0, microsecond=0)
         available_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         latest_available_cycle = available_at.replace(hour=0, minute=0, second=0, microsecond=0)
         candidate = min(requested_cycle, latest_available_cycle)
-        end_offset = int((end - candidate).total_seconds() // 3600) + 6
+        end_offset = math.ceil((end - candidate).total_seconds() / 3600) + buffer_hours
         start_offset = int((start - candidate).total_seconds() // 3600)
         if start_offset < 0 or end_offset > FORECAST_MAX_HOUR:
             raise RuntimeError(
@@ -71,13 +86,16 @@ class GfsManager:
         interval: int,
         cycle: str,
         data_source: str = "gfs",
+        *,
+        buffer_hours: int = LEGACY_BOUNDARY_BUFFER_HOURS,
     ) -> list[int]:
         source = self.normalize_source(data_source)
+        _check_buffer(buffer_hours)
+        if type(interval) is not int or interval <= 0:
+            raise ValueError("驱动资料周期须为正整数小时")
         cycle_time = datetime.strptime(cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        first = int((start.astimezone(timezone.utc) - cycle_time).total_seconds() // 3600)
-        last = int((end.astimezone(timezone.utc) - cycle_time).total_seconds() // 3600) + 6
-        first = (first // interval) * interval
-        last = ((last + interval - 1) // interval) * interval
+        first = math.floor((start.astimezone(timezone.utc) - cycle_time).total_seconds() / (interval * 3600)) * interval
+        last = math.ceil(((end.astimezone(timezone.utc) - cycle_time).total_seconds() / 3600 + buffer_hours) / interval) * interval
         if first < 0 or last > FORECAST_MAX_HOUR:
             raise ValueError(f"模拟窗口及边界缓冲超出 {source.upper()} f000-f072")
         return list(range(first, last + 1, interval))

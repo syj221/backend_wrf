@@ -1,4 +1,4 @@
-"""Pure access-policy and recommendation persistence regressions."""
+"""Pure ordinary WRF submission and private asset access regressions."""
 
 import tempfile
 import unittest
@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from database import TaskStore
-from recommendations import RecommendationManager
 from static_access import allow_run_asset
 
 
@@ -39,20 +38,6 @@ class WrfAccessTest(unittest.TestCase):
             {"sub": "alice", "role": 1}, lookup,
         ))
 
-    def test_recommendation_job_survives_restart_and_is_private(self):
-        with tempfile.TemporaryDirectory() as directory:
-            settings = SimpleNamespace(data_dir=Path(directory))
-            manager = RecommendationManager(settings, None)
-            # Persist a job without starting an external analysis.
-            job = {"id": "rec_1234567890abcdef", "owner_sub": "alice",
-                   "status": "analyzing_geography", "result": None}
-            manager._persist(job)
-            manager.stop()
-            restored = RecommendationManager(settings, None)
-            self.assertIsNone(restored.get(job["id"], "bob", 1))
-            self.assertEqual(restored.get(job["id"], "alice", 1)["status"], "interrupted")
-            self.assertNotIn("owner_sub", restored.get(job["id"], "alice", 1))
-            restored.stop()
 
 
 if __name__ == "__main__":

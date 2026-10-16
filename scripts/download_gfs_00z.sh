@@ -7,6 +7,7 @@ cycle="${1:-}"
 horizon="${2:-72}"
 requested="${3:-}"
 intent="${4:-prefetch}"
+reference="${5:-}"
 root="${WRF_GFS_DATA_ROOT:-/home/tx-lab/.wrf-data/WRFwork/DATA/GFS}"
 mount_root="${WRF_GFS_MOUNT:-/}"
 minimum_free_gb="${WRF_GFS_MIN_FREE_GB:-120}"
@@ -42,7 +43,9 @@ common=(
   --publish-probe-seconds "${WRF_POOL_PUBLISH_PROBE_SECONDS:-300}"
   --history-retention-days "${WRF_POOL_HISTORY_RETENTION_DAYS:-30}"
 )
-python3 "$queue_script" enqueue "${common[@]}" --cycle "$cycle" --hours "$requested" --priority "$intent"
+reference_args=()
+if [[ -n "$reference" ]]; then reference_args=(--reference "$reference"); fi
+python3 "$queue_script" enqueue "${common[@]}" --cycle "$cycle" --hours "$requested" --priority "$intent" "${reference_args[@]}"
 # A second worker exits immediately if the source worker is active. A task
 # enqueue therefore wakes the queue without touching its current .part file.
 nohup python3 "$queue_script" worker "${common[@]}" >> "${root}/logs/pool_worker.out" 2>&1 < /dev/null &

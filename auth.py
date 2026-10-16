@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me").strip()
-WHITELIST = {"/", "/api/health", "/docs", "/openapi.json"}
+WHITELIST = {"/", "/api/health", "/api/health/activity", "/docs", "/openapi.json"}
 
 
 def _decode_segment(value: str) -> bytes:

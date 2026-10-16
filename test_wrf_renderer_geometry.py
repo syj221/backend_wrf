@@ -44,6 +44,34 @@ class RendererGeometryTest(unittest.TestCase):
         self.assertEqual(int(image[0, 0, 3]), 0)
         self.assertEqual(int(image[0, 1, 3]), 185)
 
+    def test_multiple_times_in_one_output_file_are_not_dropped(self):
+        crs = CRS.from_proj4("+proj=lcc +lat_1=30 +lat_2=30 +lat_0=30 +lon_0=105 +R=6370000 +units=m")
+        inverse = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        x, y = np.meshgrid(np.arange(4) * 9000 - 13500, np.arange(3) * 9000 - 9000)
+        lon, lat = inverse.transform(x, y)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            raw = output / "raw"
+            raw.mkdir(parents=True)
+            with Dataset(str(raw / "wrfout_d01_2026-09-24_00:00:00"), "w") as dataset:
+                for name, size in (("Time", 2), ("DateStrLen", 19), ("south_north", 3), ("west_east", 4)):
+                    dataset.createDimension(name, size)
+                for name, value in (("MAP_PROJ", 1), ("TRUELAT1", 30.), ("TRUELAT2", 30.), ("STAND_LON", 105.), ("DX", 9000.), ("DY", 9000.)):
+                    setattr(dataset, name, value)
+                times = dataset.createVariable("Times", "S1", ("Time", "DateStrLen"))
+                for index, stamp in enumerate(("2026-09-24_00:00:00", "2026-09-24_00:30:00")):
+                    times[index] = np.frombuffer(stamp.encode(), dtype="S1")
+                for name, values in (("XLAT", lat), ("XLONG", lon), ("T2", np.full((3, 4), 280.))):
+                    variable = dataset.createVariable(name, "f8", ("Time", "south_north", "west_east"))
+                    variable[:] = np.stack([values, values])
+            manifest = render_run("fixture", raw, output, {
+                "data_source": "gfs", "start_time": "2026-09-24T00:00:00Z",
+                "end_time": "2026-09-24T00:30:00Z", "history_interval_minutes": 30,
+                "center": {"lat": 30, "lon": 105}, "domains": [{"id": "d01", "dx": 9000}],
+            }, "2026092400")
+            self.assertEqual(manifest["domains"][0]["times"], ["2026-09-24T00:00:00Z", "2026-09-24T00:30:00Z"])
+            self.assertEqual(len(manifest["domains"][0]["variables"][0]["frames"]), 2)
+
     def test_ten_minute_frames_keep_exact_times_and_common_scale(self):
         crs = CRS.from_proj4(
             "+proj=lcc +lat_1=30 +lat_2=30 +lat_0=30 +lon_0=105 +R=6370000 +units=m"
@@ -89,6 +117,15 @@ class RendererGeometryTest(unittest.TestCase):
             self.assertEqual(len({frame["display_min"] for frame in variable["frames"]}), 1)
             self.assertEqual(manifest["domains"][0]["geolocation"]["status"], "reprojected")
             self.assertTrue(any("RAINC/RAINNC" in note for note in manifest["quality"]["limitations"]))
+            checked = render_run(task_id, raw_dir, output_dir, {
+                "data_source": "gfs", "start_time": "2026-09-24T00:00:00Z",
+                "end_time": "2026-09-24T01:00:00Z", "history_interval_minutes": 10,
+                "recovery_policy": "confirm", "center": {"lat": 30, "lon": 105},
+                "domains": [{"id": "d01", "dx": 9000}, {"id": "d02", "dx": 3000}],
+            }, "2026092400")
+            self.assertNotEqual(checked["quality"]["status"], "complete")
+            self.assertIn("d01.U10", checked["quality"]["missing_variables"])
+            self.assertIn("d02", checked["quality"]["missing_times"])
 
 
 if __name__ == "__main__":

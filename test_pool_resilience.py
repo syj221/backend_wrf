@@ -28,6 +28,28 @@ def queue_args(root: Path) -> Namespace:
 
 
 class PoolResilienceTest(unittest.TestCase):
+    def test_download_progress_is_scoped_and_redacts_raw_errors(self):
+        client = HpcClient(Settings())
+        state = {"cycles": {"2026100900": {"files": {
+            "000": {"status": "queued"},
+            "003": {"status": "failed", "error": "Bearer secret /mnt/private", "failure_class": "network"},
+            "006": {"status": "downloading"}}}}}
+        with patch.object(client, "_pool_queue_state", return_value=state):
+            self.assertEqual(client.forcing_download_progress("ecmwf", "2026100900", [0])["status"], "queued")
+            result = client.forcing_download_progress("ecmwf", "2026100900", [3])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failed_hours"], [3])
+            self.assertNotIn("secret", str(result))
+            self.assertNotIn("/mnt", str(result))
+            self.assertEqual(client.forcing_download_progress("ecmwf", "2026100900", [9])["untracked_hours"], [9])
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = patch.object(queue_module, "LOCK_ROOT", Path(directory.name) / "locks")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_incomplete_cycle_does_not_hash_existing_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -164,7 +186,7 @@ class PoolResilienceTest(unittest.TestCase):
                 [f"/pool/202609{day:02d}00" for day in range(11, 7, -1)],
             )
 
-    def test_cleanup_uses_a_per_cycle_lock(self):
+    def test_cleanup_uses_the_managed_queue_without_shell_deletion(self):
         path = "/pool/2026091000"
         settings = replace(Settings(), hpc_gfs_retained_cycles=2)
 
@@ -187,8 +209,9 @@ class PoolResilienceTest(unittest.TestCase):
         client = FakeCleanupClient(settings)
         result = client.cleanup_gfs_cycles([path], ["2026091400"], set())
         self.assertEqual(result["deleted"], [path])
-        self.assertIn(".pool-cycle-2026091000.lock", client.command)
-        self.assertNotIn(".pool-worker.lock", client.command)
+        self.assertIn("forcing_pool_queue.py cleanup", client.command)
+        self.assertNotIn("rm -rf", client.command)
+        self.assertIn("--cycle 2026091000", client.command)
 
 
 if __name__ == "__main__":

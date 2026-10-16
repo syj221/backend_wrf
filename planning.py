@@ -8,8 +8,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from domain_preview import AreaOfInterest, DomainPreviewRequest, preview_domains
-from schemas import Center, DomainConfig
+from schemas import Center, DomainConfig, SpinupConfig
 from wrf_knowledge import KnowledgeStore
+from guidance import recommendations
 
 
 class EvidenceQuery(BaseModel):
@@ -20,6 +21,7 @@ class EvidenceQuery(BaseModel):
 
 
 class PlanningAssessRequest(BaseModel):
+    configuration_profile: Literal["wrf-ordinary-ui-1","wrf-ordinary-ui-2"] | None = None
     goal: str | None = Field(default=None, max_length=500)
     aoi: AreaOfInterest | None = None
     center: Center | None = None
@@ -29,17 +31,26 @@ class PlanningAssessRequest(BaseModel):
     data_source: Literal["gfs", "ecmwf"] | None = None
     forecast_interval_hours: Literal[1, 3, 6] | None = None
     history_interval_minutes: Literal[10, 30, 60, 180, 360] | None = None
+    spinup: SpinupConfig = Field(default_factory=SpinupConfig)
+    vertical_levels: int = Field(default=88, ge=10, le=500, strict=True)
     resolution_m: int | None = Field(default=None, ge=1000, le=50000)
+    duration_hours: int | None = Field(default=None, ge=1, le=720)
+    domain_count: int = Field(default=1, ge=1, le=4)
+    nesting_ratio: Literal[3, 5] = 3
     domains: list[DomainConfig] | None = None
     physics_preset: str | None = None
     evidence_query: EvidenceQuery | None = None
+    physics: dict[str, Any] | None = None
+    assimilation_scheme: Literal["off", "fdda_weak", "fdda_standard", "fdda_strong"] | None = None
+    projection: dict[str, Any] = Field(default_factory=dict)
 
 
-def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, Any]:
+def assess(payload: PlanningAssessRequest, health: dict[str, Any], pool=None) -> dict[str, Any]:
     missing: list[str] = []
-    if not payload.goal:
-        missing.append("goal")
-    if not payload.center_confirmed or not payload.center:
+    if payload.configuration_profile == "wrf-ordinary-ui-2":
+        if not payload.center:
+            missing.append("center")
+    elif not payload.center or not payload.center_confirmed:
         missing.append("center_confirmation")
     if not payload.start_time or not payload.end_time:
         missing.append("time_window")
@@ -47,15 +58,16 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, 
         missing.append("resolution")
     if not payload.data_source:
         missing.append("data_source")
-    if not payload.physics_preset:
+    if not payload.physics_preset and not payload.physics:
         missing.append("physics")
     questions = {
         "goal": "主要关注降水、风、温度还是其他现象？",
         "center_confirmation": "请在地图确认关注区域和计算域中心。",
+        "center": "请提供计算域中心坐标，或在地图绘制计算范围。",
         "time_window": "请确认具体起止日期与时间（同时显示 UTC/北京时间）。",
         "resolution": "希望最细网格距和覆盖范围是多少？",
         "data_source": "边界资料选择 GFS 还是 ECMWF？",
-        "physics": "需要通用物理预设，还是针对具体天气过程评估方案？",
+        "physics": "默认使用通用物理设置；是否需要调整具体参数？",
     }
     candidates: list[dict[str, Any]] = []
     if (payload.center or payload.aoi) and (payload.domains or payload.resolution_m):
@@ -63,6 +75,9 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, 
             preview = preview_domains(DomainPreviewRequest(
                 center=payload.center, aoi=payload.aoi, domains=payload.domains,
                 resolution_m=payload.resolution_m or 27000,
+                domain_count=payload.domain_count, nesting_ratio=payload.nesting_ratio,
+                projection=payload.projection,
+                configuration_profile=payload.configuration_profile,
             ))
             cells = sum(item["grid"][0] * item["grid"][1] for item in preview["boundaries"])
             candidates.append({
@@ -70,6 +85,7 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, 
                 "center": preview["center"], "domains": preview["domains"],
                 "center_confirmed": bool(payload.center_confirmed and preview["center_confirmed"]),
                 "aoi_covered": preview["aoi_covered"], "grid_cells_per_output": cells,
+                "finest_aoi_covered": preview["finest_aoi_covered"],
                 "finest_resolution_m": min(item["dx"] for item in preview["domains"]),
                 "warnings": preview["warnings"],
             })
@@ -84,6 +100,9 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, 
                     try:
                         alternative = preview_domains(DomainPreviewRequest(
                             center=payload.center, aoi=payload.aoi, resolution_m=int(resolution),
+                            domain_count=payload.domain_count, nesting_ratio=payload.nesting_ratio,
+                            projection=payload.projection,
+                            configuration_profile=payload.configuration_profile,
                         ))
                     except ValueError:
                         continue
@@ -142,7 +161,8 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any]) -> dict[str, 
                 literature = {"status": "knowledge_unavailable", "candidates": [],
                               "reason": "离线 WRF 知识库尚未导入；不生成虚构文献候选。"}
     return {
-        "capability_version": "wrf-ordinary-2",
+        **recommendations(payload.model_dump(mode="json", exclude_none=True), health, pool),
+        "capability_version": "wrf-ordinary-3",
         "assessed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "missing_fields": missing,
         "questions": [questions[key] for key in missing[:3]],

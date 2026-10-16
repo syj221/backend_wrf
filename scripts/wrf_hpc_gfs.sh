@@ -84,7 +84,8 @@ fi
 
 actual_tag="${BASE_TASK_TAG}_attempt-1-cpu"
 actual_root="${WORK_DIR}/WRF_${actual_tag}"
-canonical_root="${WORK_DIR}/WRF_${BASE_TASK_TAG}"
+canonical_root="${WRF_ATTEMPT_DIR:+${WRF_ATTEMPT_DIR}/wrf}"
+canonical_root="${canonical_root:-${WORK_DIR}/WRF_${BASE_TASK_TAG}}"
 # wrf.sh resolves WRF_WORK_DIR while this wrapper is sourced, before
 # run_cpu adds the attempt suffix.  Keep the canonical directory when the
 # run used it, and only publish an attempt directory when one was actually

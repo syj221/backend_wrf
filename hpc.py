@@ -473,7 +473,9 @@ from hpc_transport import HpcAuthError, HpcClient, HpcError  # noqa: E402,F401
 
 
 def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: list[int]) -> dict[str, Any]:
-    request = normalize_task_request(request)
+    from schemas import WrfTaskCreate
+    from guidance import RULESET
+    request = normalize_task_request(WrfTaskCreate.model_validate(request).model_dump(mode="json"))
     data_source = str(request.get("data_source") or "gfs").lower()
     if data_source not in {"gfs", "ecmwf"}:
         raise ValueError("数据源必须是 gfs 或 ecmwf")
@@ -487,7 +489,8 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
     if isinstance(end, str):
         end = end.replace("Z", "+00:00")
         end = datetime.fromisoformat(end)
-    model_start = start - timedelta(hours=FIXED_SPINUP_HOURS)
+    spinup_hours = int((request.get("spinup") or {}).get("hours", FIXED_SPINUP_HOURS))
+    model_start = start - timedelta(hours=spinup_hours)
     assimilation = {
         "off": {"grid_fdda": 0, "guv": 0.0, "gt": 0.0, "gq": 0.0},
         "fdda_weak": {"grid_fdda": 1, "guv": 0.0001, "gt": 0.0001, "gq": 0.0},
@@ -495,7 +498,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
         "fdda_strong": {"grid_fdda": 1, "guv": 0.0006, "gt": 0.0006, "gq": 0.0},
     }
     scheme = request["assimilation_scheme"]
-    return {
+    result = {
         "task_id": task_id,
         "display_id": task_id,
         "data_source": data_source,
@@ -505,17 +508,18 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
             "end_year": end.year, "end_month": end.month, "end_day": end.day, "end_hour": end.hour,
             "product_start": start.isoformat(),
             "model_start": model_start.isoformat(),
-            "spinup_hours": FIXED_SPINUP_HOURS,
+            "spinup_hours": spinup_hours,
             "history_interval_minutes": int(request.get("history_interval_minutes") or 60),
         },
         "center": request["center"],
         "max_dom": len(request["domains"]),
         "domains": request["domains"],
+        "vertical_levels": int(request.get("vertical_levels", 88)),
         "physics": {"num_metgrid_levels": 34, **{key: val for key, val in request["physics"].items() if key != "preset"}},
         "assimilation": {
             "scheme": scheme,
             "params": assimilation[scheme],
-            "end_hour": FIXED_SPINUP_HOURS,
+            "end_hour": spinup_hours,
             "coarse_min_dx": 9000,
             "ramp_minutes": 60,
         },
@@ -528,7 +532,17 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
             f"{cache_prefix}_file_interval_hours": int(request.get("forecast_interval_hours") or 1),
         },
         "output": {"task_tag": task_id},
+        "time_step_seconds": request.get("time_step_seconds"),
+        "ruleset": RULESET,
     }
+    if request.get("namelist"):
+        from namelist_config import resolve, source_catalog
+        plan = resolve(request)
+        import hashlib
+        result["namelist_plan"] = {"previews": plan["previews"], "digest": plan["digest"],
+            "preview_hashes": {k: hashlib.sha256(v.encode()).hexdigest() for k, v in plan["previews"].items()},
+            "source_hash": source_catalog()["source_hash"], "binary_hashes": source_catalog()["binary_hashes"]}
+    return result
 
 
 def write_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: list[int], path: Path) -> dict[str, Any]:
@@ -548,6 +562,7 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
     forcing = config[cache_key]
     assimilation = config["assimilation"]
     environment: dict[str, Any] = {
+        "WRF_TIME_STEP_SECONDS": config.get("time_step_seconds") or "",
         "WRF_TASK_TAG": config["output"]["task_tag"],
         "WRF_REQUESTED_RUNTIME_PROFILE": config.get("runtime_profile", "cpu"),
         "WRF_DATA_SOURCE": "gfs" if data_source == "gfs" else "ec",
@@ -570,13 +585,8 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
         "WRF_ASSIMILATION_SCHEME": assimilation["scheme"],
         "WRF_ASSIM_SPINUP_HOURS": time_range.get("spinup_hours", 0),
         "WRF_HISTORY_BEGIN_MINUTES": int(time_range.get("spinup_hours", 0)) * 60,
-        # Native restart files are the durable hand-off from ordinary WRF to
-        # the high-resolution ndown route.  Keep one restart per business hour.
         "WRF_RESTART_INTERVAL_MINUTES": 60,
-        # The d04 native output is the parent for the WRF-LES chain.  Use the
-        # same 88-level vertical grid for new ordinary WRF tasks so ndown can
-        # preserve the high-resolution vertical contract.
-        "WRF_E_VERT": 88,
+        "WRF_E_VERT": int(config.get("vertical_levels", 88)),
     }
     variable_prefix = "WRF_GFS" if data_source == "gfs" else "WRF_EC"
     environment[f"{variable_prefix}_DATE"] = forcing[f"{cache_prefix}_cycle_date"]
@@ -624,6 +634,8 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
             ("e_sn", "WRF_E_SN"),
             ("i_parent_start", "WRF_I_PARENT_START"),
             ("j_parent_start", "WRF_J_PARENT_START"),
+            ("parent_id", "WRF_PARENT_ID"),
+            ("parent_grid_ratio", "WRF_PARENT_GRID_RATIO"),
         ):
             environment[f"{variable}_{suffix}"] = domain[key]
         if index == 1:

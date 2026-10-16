@@ -20,6 +20,8 @@ import sys
 import tempfile
 import time
 import shutil
+import stat
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,7 @@ HOURS = tuple(range(73))
 ECMWF_HOURS = tuple(range(0, 73, 3))
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 TRANSIENT_CURL_ERRORS = {6, 7, 18, 28, 35, 52, 56}
+LOCK_ROOT = Path("/tmp") / f"wrf-forcing-locks-{os.getuid()}"
 
 
 def utc_now() -> str:
@@ -72,7 +75,43 @@ def read_json(path: Path) -> Dict[str, Any]:
 
 
 @contextmanager
+def kernel_guard(path: Path, blocking: bool = True):
+    """Keep advisory locks on the host filesystem, not the FUSE data volume."""
+    root = LOCK_ROOT
+    root.mkdir(mode=0o700, exist_ok=True)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("unsafe forcing lock directory")
+    key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+    fd = os.open(root / key, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError("unsafe forcing lock file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield None
+            return
+        yield fd
+    finally:
+        # Do not LOCK_UN: a surviving curl child inherits this descriptor and
+        # must keep the lock until it has stopped writing the partial file.
+        os.close(fd)
+
+
+@contextmanager
 def exclusive(path: Path, blocking: bool = True):
+    with kernel_guard(path, blocking) as guard:
+        if guard is None:
+            yield None
+            return
+        with legacy_exclusive(path, blocking) as handle:
+            yield handle
+
+
+@contextmanager
+def legacy_exclusive(path: Path, blocking: bool = True):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as handle:
         flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
@@ -89,47 +128,44 @@ def exclusive(path: Path, blocking: bool = True):
 
 @contextmanager
 def exclusive_process(path: Path):
-    """Acquire a cross-process lock using atomic mkdir.
+    """Use an inherited kernel lock plus the legacy worker presence marker.
 
-    The provider data roots may live on an NTFS volume mounted through FUSE,
-    where advisory flock behavior is not reliable across independent worker
-    processes. A lock directory gives cron and API-triggered workers one
-    portable single-instance gate, while the pid file lets a later worker
-    recover an orphaned lock after a crash.
+    An incomplete or legacy marker is unknown, even if its PID is absent.
+    Only a v2 marker protected by this same kernel gate can be reclaimed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    acquired = False
-    try:
+    with kernel_guard(path, blocking=False) as guard:
+        if guard is None:
+            yield None
+            return
+        if path.exists() or path.is_symlink():
+            owner = read_json(path / "owner.json") if not path.is_symlink() else {}
+            if owner.get("protocol") != "wrf-pool-worker-2" or owner.get("root") != str(path.resolve()):
+                yield None
+                return
+            if {item.name for item in path.iterdir()} != {"pid", "owner.json"}:
+                yield None
+                return
+            # The free inherited kernel lock proves no v2 worker or curl
+            # still owns this marker, independent of PID reuse or reboot.
+            (path / "owner.json").unlink()
+            (path / "pid").unlink()
+            path.rmdir()
+        path.mkdir()
+        marker = path.stat().st_ino
         try:
-            path.mkdir()
-            acquired = True
-        except FileExistsError:
-            pid_path = path / "pid"
-            try:
-                pid = int(pid_path.read_text(encoding="ascii").strip())
-            except (OSError, ValueError):
-                pid = 0
-            if pid > 0:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    pid = 0
-            if pid > 0:
-                yield None
-                return
-            shutil.rmtree(path, ignore_errors=True)
-            try:
-                path.mkdir()
-                acquired = True
-            except FileExistsError:
-                yield None
-                return
-        if acquired:
             (path / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
-        yield path if acquired else None
-    finally:
-        if acquired:
-            shutil.rmtree(path, ignore_errors=True)
+            atomic_json(path / "owner.json", {"protocol": "wrf-pool-worker-2", "pid": os.getpid(),
+                        "root": str(path.resolve()), "created_at": utc_now()})
+            yield guard
+        finally:
+            if path.is_dir() and not path.is_symlink() and path.stat().st_ino == marker:
+                for name in ("owner.json", "pid"):
+                    try:
+                        (path / name).unlink()
+                    except FileNotFoundError:
+                        pass
+                path.rmdir()
 
 
 class PoolQueue:
@@ -140,6 +176,7 @@ class PoolQueue:
         self.state_path = self.root / ".pool-queue.json"
         self.state_lock = self.root / ".pool-queue.lock"
         self.worker_lock = self.root / ".pool-worker.lockdir"
+        self.worker_fds: Tuple[int, ...] = ()
 
     def expected_hours(self) -> Tuple[int, ...]:
         """Return the forecast fields actually published by this provider."""
@@ -160,10 +197,84 @@ class PoolQueue:
         return {"version": 1, "source": self.source, "updated_at": utc_now(), "cycles": {}}
 
     def load_state(self) -> Dict[str, Any]:
+        if not self.state_path.exists():
+            return self.default_state()
         state = read_json(self.state_path)
         if state.get("version") != 1 or state.get("source") != self.source or not isinstance(state.get("cycles"), dict):
-            return self.default_state()
+            raise ValueError("forcing queue state is unreadable or invalid; preserve it for operator review")
         return state
+
+    def snapshot(self, cycle: str) -> Dict[str, Any]:
+        """Fingerprint exact cycle contents without following symbolic links."""
+        cycle = safe_cycle(cycle)
+        root = self.root / cycle
+        entries, size, files = [], 0, 0
+        def visit(path):
+            nonlocal size, files
+            before = path.lstat()
+            item = {"path":str(path.relative_to(root)),"device":before.st_dev,
+                    "inode":before.st_ino,"size":before.st_size,"mtime_ns":before.st_mtime_ns}
+            if stat.S_ISLNK(before.st_mode) or not (stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)):
+                raise ValueError("cycle contains a symbolic link or unsupported entry")
+            if stat.S_ISDIR(before.st_mode):
+                item["kind"] = "directory"
+                for child in sorted(path.iterdir()):
+                    visit(child)
+            else:
+                item["kind"] = "file"
+                descriptor = os.open(str(path),os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor,"rb") as stream:
+                    if (os.fstat(stream.fileno()).st_dev,os.fstat(stream.fileno()).st_ino) != (before.st_dev,before.st_ino):
+                        raise ValueError("cycle entry changed while reading")
+                    digest = hashlib.sha256()
+                    for block in iter(lambda:stream.read(1024*1024),b""):
+                        digest.update(block)
+                    item["sha256"] = digest.hexdigest()
+                size += before.st_size
+                files += 1
+            after = path.lstat()
+            if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+                raise ValueError("cycle changed while fingerprinting")
+            entries.append(item)
+        if root.exists() or root.is_symlink():
+            visit(root)
+        value = {"path":str(root),"cycle":cycle,"exists":bool(entries),"entries":entries}
+        return {"path":str(root),"cycle":cycle,"files":files,"bytes":size,
+                "digest":hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()}
+
+    def cleanup(self, cycle: str, expected_digest=None) -> str:
+        """Delete one caller-approved cycle while no source worker can write."""
+        cycle = safe_cycle(cycle)
+        path = self.root / cycle
+        with exclusive_process(self.worker_lock) as worker:
+            if worker is None:
+                return "BLOCKED"
+            with exclusive(self.state_lock):
+                state = self.load_state()
+                if path.is_symlink() or (path.exists() and not path.is_dir()):
+                    return "BLOCKED"
+                entry = state.get("cycles", {}).get(cycle) or {}
+                if any(item.get("priority") == "task" and item.get("status") not in {"ready", "failed"}
+                       for item in (entry.get("files") or {}).values()):
+                    return "BLOCKED"
+                if expected_digest and self.snapshot(cycle)["digest"] != expected_digest:
+                    return "BLOCKED"
+                # Preserve the queue entry in a durable intent before removal.
+                # A lost SSH response is reconciled from this audit, not retried.
+                audit = self.root / "logs" / f"cleanup_{cycle}_{uuid.uuid4().hex}.json"
+                record = {"version": 1, "source": self.source, "cycle": cycle,
+                          "path": str(path), "queue_entry": entry, "status": "started", "created_at": utc_now()}
+                atomic_json(audit, record)
+                existed = path.exists()
+                if existed:
+                    shutil.rmtree(path)
+                if path.exists() or path.is_symlink():
+                    raise RuntimeError("cycle still exists after cleanup")
+                state.get("cycles", {}).pop(cycle, None)
+                self.save_state(state)
+                outcome = "DELETED" if existed else "MISSING"
+                atomic_json(audit, {**record, "status": outcome.lower(), "finished_at": utc_now()})
+                return outcome
 
     def save_state(self, state: Dict[str, Any]) -> None:
         state["updated_at"] = utc_now()
@@ -235,8 +346,10 @@ class PoolQueue:
                     .replace("{date}", date).replace("{hour}", init).replace("{step}", str(hour)))
         return f"https://data.ecmwf.int/forecasts/{date}/{init}z/ifs/0p25/oper/{date}{init}0000-{hour}h-oper-fc.grib2"
 
-    def enqueue(self, cycle: str, hours: List[int], priority: str) -> None:
+    def enqueue(self, cycle: str, hours: List[int], priority: str, reference=None) -> None:
         cycle = safe_cycle(cycle)
+        if reference and not re.fullmatch(r"forcing_[a-f0-9]{32}",reference):
+            raise ValueError("invalid download reference")
         if self.source == "ecmwf":
             invalid = sorted(set(hours) - set(self.expected_hours()))
             if invalid:
@@ -262,6 +375,14 @@ class PoolQueue:
             for hour in hours:
                 key = f"{hour:03d}"
                 entry = files.setdefault(key, {"status": "queued", "priority": priority, "attempts": 0, "no_progress_attempts": 0})
+                if reference:
+                    entry.setdefault("references",{})[reference] = True
+                elif priority == "task":
+                    entry["legacy_task_reference"] = True
+                if priority == "prefetch":
+                    entry["prefetch_reference"] = True
+                if entry.get("status") == "cancelled":
+                    entry["status"] = "queued"
                 path = self.file_path(cycle, hour)
                 if self.valid(path):
                     size = path.stat().st_size
@@ -281,6 +402,42 @@ class PoolQueue:
                     ):
                         entry.update({"status": "queued", "attempts": 0, "no_progress_attempts": 0, "error": None, "retry_at": 0, "terminal_retry_at": 0, "failure_class": "", "failed_at": 0, "retryable": False})
             item["updated_at"] = utc_now()
+            self.save_state(state)
+
+    def release_reference(self, cycle, reference):
+        cycle = safe_cycle(cycle)
+        if not re.fullmatch(r"forcing_[a-f0-9]{32}",reference or ""):
+            raise ValueError("invalid download reference")
+        with exclusive(self.state_lock):
+            state = self.load_state()
+            for entry in state.get("cycles",{}).get(cycle,{}).get("files",{}).values():
+                # An old untracked task intent is preserved conservatively.
+                refs = entry.get("references")
+                if not isinstance(refs,dict) or reference not in refs:
+                    continue
+                refs.pop(reference)
+                if not refs and not entry.get("legacy_task_reference"):
+                    entry["priority"] = "prefetch"
+                    if not entry.get("prefetch_reference") and entry.get("status") not in {"ready","downloading"}:
+                        entry["status"] = "cancelled"
+            self.save_state(state)
+
+    def expire_prefetch(self, keep):
+        keep = {safe_cycle(cycle) for cycle in keep}
+        with exclusive(self.state_lock) as lock:
+            if lock is None:
+                raise RuntimeError("could not acquire queue state lock")
+            state = self.load_state()
+            for cycle,item in state.get("cycles",{}).items():
+                if cycle in keep:
+                    continue
+                for entry in item.get("files",{}).values():
+                    entry["prefetch_reference"] = False
+                    if (not entry.get("references") and not entry.get("legacy_task_reference")
+                            and entry.get("status") not in {"ready","downloading"}):
+                        entry.update(status="cancelled",retry_at=0)
+                if not any(entry.get("references") or entry.get("legacy_task_reference") or entry.get("status")=="downloading" for entry in item.get("files",{}).values()):
+                    item.update(publication="expired",publication_error="",active_file=None)
             self.save_state(state)
 
     def forget(self, cycle: str) -> None:
@@ -323,7 +480,7 @@ class PoolQueue:
         """Probe f072 before spending bandwidth on low-priority bulk prefetch."""
         probe = self.root / f".publish-probe-{cycle}.part"
         command = ["curl", "--fail", "--location", "--range", "0-16383", "--connect-timeout", "20", "--max-time", "45", "--silent", "--show-error", "--output", str(probe), self.url(cycle, 72)]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True, check=False)
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
         try:
             available = result.returncode == 0 and probe.read_bytes().startswith(b"GRIB")
         except OSError:
@@ -352,7 +509,7 @@ class PoolQueue:
                 files = cycle_state.get("files", {})
                 has_task = any(entry.get("priority") == "task" and entry.get("status") not in {"ready", "failed"} for entry in files.values() if isinstance(entry, dict))
                 for key, entry in files.items():
-                    if not isinstance(entry, dict) or not key.isdigit() or entry.get("status") == "obsolete":
+                    if not isinstance(entry, dict) or not key.isdigit() or entry.get("status") in {"obsolete","cancelled"}:
                         continue
                     hour = int(key)
                     path = self.file_path(cycle, hour)
@@ -422,12 +579,37 @@ class PoolQueue:
             return 0
 
     def _download_one(self, cycle: str, hour: int) -> None:
-        # The provider worker lock serializes selection, while the cycle lock
-        # lets cleanup remove an unrelated old cycle during a long download.
-        with exclusive(self.cycle_lock(cycle), blocking=False) as cycle_guard:
-            if cycle_guard is None:
+        # Each provider has its own inherited slot; worker/cycle gates remain shared
+        # with legacy workers. A surviving curl retains its provider slot.
+        with kernel_guard(self.root / '.pool-download-slot', blocking=False) as transfer:
+            if transfer is None:
+                self._set_wait(cycle, 'source_transfer_busy')
+                time.sleep(.2)
                 return
-            self._download_one_locked(cycle, hour)
+            previous = self.worker_fds
+            self.worker_fds = (*previous,transfer)
+            try:
+                with exclusive(self.cycle_lock(cycle), blocking=False) as cycle_guard:
+                    if cycle_guard is None:
+                        self._set_wait(cycle, 'cycle_busy')
+                        time.sleep(.2)
+                        return
+                    self._set_wait(cycle, '')
+                    self._download_one_locked(cycle, hour)
+            finally:
+                self.worker_fds = previous
+
+    def _set_wait(self, cycle: str, reason: str) -> None:
+        # Store codes only; readers do not expose remote paths or raw errors.
+        with exclusive(self.state_lock) as lock:
+            if lock is None:
+                return
+            state = self.load_state()
+            item = state.get('cycles', {}).get(cycle)
+            if item is not None:
+                item['wait_code'] = reason
+                item['wait_observed_at'] = epoch_now()
+                self.save_state(state)
 
     def _download_one_locked(self, cycle: str, hour: int) -> None:
         output = self.file_path(cycle, hour)
@@ -448,10 +630,10 @@ class PoolQueue:
             state["cycles"][cycle]["active_file"] = self.file_name(hour)
             state["cycles"][cycle]["updated_at"] = utc_now()
             self.save_state(state)
-        command = ["curl", "--fail", "--location", "--continue-at", "-", "--connect-timeout", "30", "--speed-time", "120", "--speed-limit", str(self.args.min_speed), "--dump-header", str(headers), "--output", str(part), "--write-out", "%{speed_download}", self.url(cycle, hour)]
+        command = ["curl", "--fail", "--location", "--continue-at", "-", "--connect-timeout", "30", "--max-time", "3600", "--speed-time", "120", "--speed-limit", str(self.args.min_speed), "--dump-header", str(headers), "--output", str(part), "--write-out", "%{speed_download}", self.url(cycle, hour)]
         command_error = ""
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False)
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
         except OSError as exc:
             result = None
             command_error = f"download command failed: {exc}"
@@ -537,7 +719,14 @@ class PoolQueue:
     def worker(self) -> int:
         with exclusive_process(self.worker_lock) as worker:
             if worker is None:
-                return 0
+                return 3
+            self.worker_fds = (worker,)
+            with exclusive(self.state_lock) as lock:
+                if lock is None:
+                    return 3
+                state = self.load_state()
+                state['transport_policy'] = 'per-provider-1'
+                self.save_state(state)
             self.recover_interrupted_downloads()
             while True:
                 picked = self._pick_next()
@@ -597,11 +786,14 @@ class PoolQueue:
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("enqueue", "worker", "forget"))
+    parser.add_argument("action", choices=("enqueue", "worker", "forget", "cleanup", "snapshot", "release", "expire-prefetch"))
     parser.add_argument("--source", choices=("gfs", "ecmwf"), required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--cycle")
     parser.add_argument("--hours")
+    parser.add_argument("--expected-digest")
+    parser.add_argument("--reference")
+    parser.add_argument("--keep-cycles", default="")
     parser.add_argument("--priority", choices=("task", "prefetch"), default="prefetch")
     parser.add_argument("--min-bytes", type=int, default=1048576)
     parser.add_argument("--min-speed", type=int, default=1024)
@@ -614,8 +806,8 @@ def arguments() -> argparse.Namespace:
     args = parser.parse_args()
     if args.action == "enqueue" and (not args.cycle or args.hours is None):
         parser.error("enqueue requires --cycle and --hours")
-    if args.action == "forget" and not args.cycle:
-        parser.error("forget requires --cycle")
+    if args.action in {"forget", "cleanup", "snapshot", "release"} and not args.cycle:
+        parser.error("forget/cleanup requires --cycle")
     return args
 
 
@@ -623,12 +815,26 @@ def main() -> int:
     args = arguments()
     queue = PoolQueue(args)
     if args.action == "enqueue":
-        queue.enqueue(args.cycle, parse_hours(args.hours), args.priority)
+        queue.enqueue(args.cycle, parse_hours(args.hours), args.priority,args.reference)
         print(f"QUEUED|{args.cycle}|{args.priority}")
         return 0
     if args.action == "forget":
         queue.forget(args.cycle)
         print(f"FORGOTTEN|{args.cycle}")
+        return 0
+    if args.action == "cleanup":
+        print(f"{queue.cleanup(args.cycle,args.expected_digest)}|{queue.root / args.cycle}")
+        return 0
+    if args.action == "snapshot":
+        print(json.dumps(queue.snapshot(args.cycle)))
+        return 0
+    if args.action == "release":
+        queue.release_reference(args.cycle,args.reference)
+        print(json.dumps({"reference":args.reference,"status":"released"}))
+        return 0
+    if args.action == "expire-prefetch":
+        queue.expire_prefetch([cycle for cycle in args.keep_cycles.split(',') if cycle])
+        print(json.dumps({"status":"expired"}))
         return 0
     return queue.worker()
 

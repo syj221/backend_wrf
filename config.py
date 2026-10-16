@@ -8,7 +8,13 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
+# Operator-only deployment overlay; inherited process environment still wins.
+load_dotenv(BASE_DIR / ".runtime.env")
 load_dotenv(BASE_DIR / ".env")
+
+# Opt in only after the offline backup has passed its migration checks.
+RUNTIME_ASSET_ROOT = (Path(os.environ["WRF_RUNTIME_ASSET_ROOT"]).expanduser().resolve()
+                      if os.getenv("WRF_RUNTIME_ASSET_ROOT") else None)
 
 
 DEFAULT_HPC_STORAGE_UUID = "7EEE64E3EE6494E5"
@@ -28,36 +34,25 @@ def _flag(name: str, default: bool) -> bool:
 class Settings:
     host: str = os.getenv("WRF_HOST", "127.0.0.1")
     port: int = int(os.getenv("WRF_PORT", "8007"))
-    data_dir: Path = Path(os.getenv("WRF_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
-    run_dir: Path = Path(os.getenv("WRF_RUN_DATA_DIR", BASE_DIR / "data" / "runs")).expanduser().resolve()
-    database_path: Path = Path(os.getenv("WRF_DATABASE_PATH", BASE_DIR / "data" / "wrf_tasks.sqlite3")).expanduser().resolve()
+    runtime_asset_root: Path | None = RUNTIME_ASSET_ROOT
+    legacy_asset_manifest: Path | None = (Path(os.environ["WRF_LEGACY_ASSET_MANIFEST"]).expanduser().resolve()
+        if os.getenv("WRF_LEGACY_ASSET_MANIFEST") else RUNTIME_ASSET_ROOT / "legacy-assets.json" if RUNTIME_ASSET_ROOT else None)
+    data_dir: Path = Path(os.getenv("WRF_DATA_DIR", RUNTIME_ASSET_ROOT / "data" if RUNTIME_ASSET_ROOT else BASE_DIR / "data")).expanduser().resolve()
+    run_dir: Path = Path(os.getenv("WRF_RUN_DATA_DIR", RUNTIME_ASSET_ROOT / "runs" if RUNTIME_ASSET_ROOT else BASE_DIR / "data" / "runs")).expanduser().resolve()
+    database_path: Path = Path(os.getenv("WRF_DATABASE_PATH", RUNTIME_ASSET_ROOT / "wrf_tasks.sqlite3" if RUNTIME_ASSET_ROOT else BASE_DIR / "data" / "wrf_tasks.sqlite3")).expanduser().resolve()
     downscale_database_path: Path = Path(
         os.getenv("WRF_DOWNSCALE_DATABASE_PATH", BASE_DIR / "data" / "downscale_tasks.sqlite3")
     ).expanduser().resolve()
-    downscale_terrain_catalog_path: Path = Path(
-        os.getenv("WRF_DOWNSCALE_TERRAIN_CATALOG", BASE_DIR / "data" / "downscale_terrain_assets.json")
-    ).expanduser().resolve()
-    terrain_artifact_base_url: str = os.getenv("TERRAIN_ARTIFACT_BASE_URL", "http://127.0.0.1:8003").strip().rstrip("/")
-    terrain_artifact_service_token: str = os.getenv("TERRAIN_ARTIFACT_SERVICE_TOKEN", "").strip()
-    downscale_confirmation_secret: str = os.getenv(
-        "WRF_DOWNSCALE_CONFIRMATION_SECRET", os.getenv("JWT_SECRET", "dev-downscale-confirmation-secret")
-    )
-    downscale_confirmation_ttl_seconds: int = max(
-        60, min(3600, int(os.getenv("WRF_DOWNSCALE_CONFIRMATION_TTL_SECONDS", "600")))
-    )
-    downscale_available_memory_gib: float = max(
-        1.0, float(os.getenv("WRF_DOWNSCALE_AVAILABLE_MEMORY_GIB", "128"))
-    )
-    downscale_available_disk_gib: float = max(
-        100.0, float(os.getenv("WRF_DOWNSCALE_AVAILABLE_DISK_GIB", "208"))
-    )
-    downscale_native_retention_days: int = max(
-        1, min(3650, int(os.getenv("WRF_DOWNSCALE_NATIVE_RETENTION_DAYS", "90")))
-    )
-    downscale_runner_enabled: bool = _flag("WRF_DOWNSCALE_RUNNER_ENABLED", True)
-    downscale_runner_poll_seconds: int = max(
-        2, min(300, int(os.getenv("WRF_DOWNSCALE_RUNNER_POLL_SECONDS", "10")))
-    )
+    # The retired product cannot be re-enabled by an inherited environment.
+    downscale_retired: bool = True
+    ordinary_max_concurrent: int = max(1, min(4, int(os.getenv("WRF_MAX_CONCURRENT_TASKS", "1"))))
+    compute_cpu_headroom: int = max(0, int(os.getenv("WRF_CPU_HEADROOM", "2")))
+    compute_memory_headroom_bytes: int = max(0, int(os.getenv("WRF_MEMORY_HEADROOM_BYTES", str(2 * 1024**3))))
+    hpc_runtime_release: str = os.getenv("WRF_RUNTIME_RELEASE", "").strip()
+    hpc_release_root: str = os.getenv("WRF_RUNTIME_RELEASE_ROOT", "").strip().rstrip("/")
+    hpc_workbench_data_root: str = os.getenv("WRF_WORKBENCH_DATA_ROOT", "").strip().rstrip("/")
+    hpc_runtime_python: str = os.getenv("WRF_RUNTIME_PYTHON", "python3").strip()
+    readiness_cache_seconds: int = max(5, int(os.getenv("WRF_READINESS_CACHE_SECONDS", "30")))
     catalog_publish_enabled: bool = _flag("WRF_CATALOG_PUBLISH_ENABLED", True)
     catalog_data_root: Path = Path(
         os.getenv("WRF_CATALOG_DATA_ROOT", BASE_DIR.parent / "backend_system" / "data")
@@ -78,6 +73,9 @@ class Settings:
         f"{HPC_STORAGE_ALIAS}/WRFwork/RUNTIME/backend_wrf_service/download_gfs_00z.sh",
     ).strip()
     hpc_gfs_poll_seconds: int = max(5, int(os.getenv("WRF_HPC_GFS_POLL_SECONDS", "30")))
+    hpc_forcing_wait_timeout_seconds: int = max(
+        60, int(os.getenv("WRF_HPC_FORCING_WAIT_TIMEOUT_SECONDS", "21600"))
+    )
     hpc_gfs_download_workers: int = max(
         1, min(8, int(os.getenv("WRF_HPC_GFS_DOWNLOAD_WORKERS", "1")))
     )
@@ -152,18 +150,6 @@ class Settings:
     hpc_runtime_env: str = os.getenv(
         "WRF_HPC_RUNTIME_ENV", "/home/tx-lab/WRFwork/env_wrf_nvhpc.sh"
     ).strip()
-    hpc_downscale_interface_root: str = os.getenv(
-        "WRF_HPC_DOWNSCALE_INTERFACE_ROOT", "/home/tx-lab/WRFwork/CFD/interface"
-    ).strip().rstrip("/")
-    hpc_downscale_cfd_template: str = os.getenv(
-        "WRF_HPC_DOWNSCALE_CFD_TEMPLATE", "/home/tx-lab/WRFwork/CFD/templates/thermal-rans-graded-v2"
-    ).strip().rstrip("/")
-    hpc_downscale_openfoam_activate: str = os.getenv(
-        "WRF_HPC_DOWNSCALE_OPENFOAM_ACTIVATE", "/home/tx-lab/WRFwork/CFD/activate.sh"
-    ).strip()
-    hpc_downscale_python: str = os.getenv(
-        "WRF_HPC_DOWNSCALE_PYTHON", "/home/tx-lab/WRFwork/ENV/wrfpost/bin/python"
-    ).strip()
     hpc_gfs_mount: str = os.getenv(
         "WRF_HPC_GFS_MOUNT", HPC_STORAGE_ALIAS
     ).strip().rstrip("/") or "/"
@@ -223,8 +209,10 @@ class Settings:
         return [item.strip() for item in raw.split(",") if item.strip()]
 
     def ensure_directories(self) -> None:
-        for path in (self.data_dir, self.run_dir, self.output_dir, self.database_path.parent, self.downscale_database_path.parent):
+        for path in (self.data_dir, self.run_dir, self.output_dir, self.database_path.parent):
             path.mkdir(parents=True, exist_ok=True)
+            if self.runtime_asset_root and path.resolve().is_relative_to(self.runtime_asset_root.resolve()):
+                path.chmod(0o700)
 
 
 settings = Settings()

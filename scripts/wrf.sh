@@ -1,4 +1,5 @@
 #!/bin/bash
+WRF_SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #===============================================================================
 # WRF 自动化处理脚本
 # 功能：数据准备、环境搭建、WPS处理、WRF运行
@@ -255,8 +256,16 @@ preflight_hpc_runtime() {
             missing=$((missing + 1))
         fi
     done
-    if ldd "${WRF_SOURCE_DIR}/main/real.exe" "${WRF_SOURCE_DIR}/main/wrf.exe" 2>/dev/null | grep -q 'not found'; then
+    if ldd "${WRF_SOURCE_DIR}/main/real.exe" "${WRF_SOURCE_DIR}/main/wrf.exe" "${WPS_SOURCE_DIR}/geogrid.exe" "${WPS_SOURCE_DIR}/ungrib.exe" "${WPS_SOURCE_DIR}/metgrid.exe" 2>/dev/null | grep -q 'not found'; then
         log_error "WRF ${WRF_RUNTIME_PROFILE:-cpu} 可执行文件存在未解析动态库"
+        missing=$((missing + 1))
+    fi
+    if ! python3 -B -c 'import f90nml, netCDF4, eccodes' >/dev/null 2>&1; then
+        log_error "独立 Python 缺少 f90nml、NetCDF 或 ecCodes"
+        missing=$((missing + 1))
+    fi
+    if [ ! -f "${WPS_SOURCE_DIR}/ungrib/Variable_Tables/Vtable.GFS" ]; then
+        log_error "缺少专用 Vtable.GFS"
         missing=$((missing + 1))
     fi
     if [ "${WRF_RUNTIME_PROFILE:-cpu}" = "gpu" ]; then
@@ -289,17 +298,10 @@ resolve_grib_filter() {
         command -v grib_filter
         return 0
     fi
-    local candidate
-    for candidate in \
-        "${HOME:-/home/tx-lab}/anaconda3/envs/ghi/bin/grib_filter" \
-        "${HOME:-/home/tx-lab}/anaconda3/envs/xyf_passat/bin/grib_filter" \
-        "${HOME:-/home/tx-lab}/anaconda3/pkgs/eccodes-2.27.0-h164a9dd_0/bin/grib_filter" \
-        "${HOME:-/home/tx-lab}/anaconda3/pkgs/eccodes-2.23.0-h11d1a29_2/bin/grib_filter"; do
-        if [ -x "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    if [ -n "${ECCODES_DIR:-}" ] && [ -x "${ECCODES_DIR}/bin/grib_filter" ]; then
+        printf '%s\n' "${ECCODES_DIR}/bin/grib_filter"
+        return 0
+    fi
     return 1
 }
 
@@ -430,8 +432,8 @@ csv_parent_ids_wps() {
     local out=""
     local max_dom=${WRF_MAX_DOM:-2}
     for lvl in $(seq 1 "$max_dom"); do
-        local value=1
-        if [ "$lvl" -gt 2 ]; then value=$((lvl - 1)); fi
+        local value
+        value=$(domain_value "WRF_PARENT_ID" "$lvl" "$((lvl > 1 ? lvl - 1 : 1))")
         if [ -z "$out" ]; then out="$value"; else out="${out}, ${value}"; fi
     done
     echo "$out"
@@ -441,8 +443,8 @@ csv_parent_ids_wrf() {
     local out=""
     local max_dom=${WRF_MAX_DOM:-2}
     for lvl in $(seq 1 "$max_dom"); do
-        local value=0
-        if [ "$lvl" -gt 1 ]; then value=$((lvl - 1)); fi
+        local value
+        value=$(domain_value "WRF_PARENT_ID" "$lvl" "$((lvl > 1 ? lvl - 1 : 0))")
         if [ -z "$out" ]; then out="$value"; else out="${out}, ${value}"; fi
     done
     echo "$out"
@@ -461,10 +463,11 @@ csv_grid_ratios() {
     local out="1"
     local max_dom=${WRF_MAX_DOM:-2}
     for lvl in $(seq 2 "$max_dom"); do
-        local parent_dx child_dx ratio
-        parent_dx=$(domain_value "WRF_DX" $((lvl - 1)) 27000)
+        local parent_dx child_dx ratio parent_id
+        parent_id=$(domain_value "WRF_PARENT_ID" "$lvl" "$((lvl - 1))")
+        parent_dx=$(domain_value "WRF_DX" "$parent_id" 27000)
         child_dx=$(domain_value "WRF_DX" "$lvl" 9000)
-        ratio=$(( parent_dx / child_dx ))
+        ratio=$(domain_value "WRF_PARENT_GRID_RATIO" "$lvl" "$((parent_dx / child_dx))")
         out="${out}, ${ratio}"
     done
     echo "$out"
@@ -846,9 +849,18 @@ step1_forecast_data_preparation() {
     fi
 
     local manifest="${data_dir}/manifest.json"
-    local expected_index="${WRF_GFS_EXPECTED_INDEX:-}"
+    local expected_index
+    if [ "$provider" = "ec" ]; then
+        expected_index="${WRF_EC_EXPECTED_INDEX:-}"
+    else
+        expected_index="${WRF_GFS_EXPECTED_INDEX:-}"
+    fi
+    if [ -n "${WRF_ATTEMPT_DIR:-}" ] && [ ! -s "$expected_index" ]; then
+        log_error "缺少 ${provider_upper} 任务级校验索引，拒绝准备隔离运行"
+        exit 1
+    fi
     if [ -s "$expected_index" ]; then
-        log_info "发现任务级 GFS 校验索引，将使用 Shell 校验文件大小和 SHA256"
+        log_info "发现任务级 ${provider_upper} 校验索引，将使用 Shell 校验文件大小和 SHA256"
     elif [ -f "$manifest" ]; then
         log_info "发现 manifest.json，将校验文件大小和 SHA256"
     else
@@ -878,7 +890,7 @@ step1_forecast_data_preparation() {
                     $1 == name { count += 1; record = $2 "|" $3 }
                     END { if (count != 1) exit 2; print record }
                 ' "$expected_index"); then
-                    log_error "  GFS 校验索引缺少或重复记录: $(basename "$outfile")"
+                    log_error "  ${provider_upper} 校验索引缺少或重复记录: $(basename "$outfile")"
                     missing=$((missing + 1))
                     continue
                 fi
@@ -981,9 +993,12 @@ step2_environment_setup() {
     load_runtime_environment
 
     # 2. 创建带时间特征命名的工作目录
-    local wps_work_dir="${WORK_DIR}/WPS_${TASK_TAG}"
-    local wrf_work_dir="${WORK_DIR}/WRF_${TASK_TAG}"
-    local logs_dir="${WORK_DIR}/logs_${TASK_TAG}"
+    local wps_work_dir="${WRF_ATTEMPT_DIR:+${WRF_ATTEMPT_DIR}/wps}"
+    local wrf_work_dir="${WRF_ATTEMPT_DIR:+${WRF_ATTEMPT_DIR}/wrf}"
+    local logs_dir="${WRF_ATTEMPT_DIR:+${WRF_ATTEMPT_DIR}/logs}"
+    wps_work_dir="${wps_work_dir:-${WORK_DIR}/WPS_${TASK_TAG}}"
+    wrf_work_dir="${wrf_work_dir:-${WORK_DIR}/WRF_${TASK_TAG}}"
+    logs_dir="${logs_dir:-${WORK_DIR}/logs_${TASK_TAG}}"
 
     export WPS_WORK_DIR="$wps_work_dir"
     export WRF_WORK_DIR="$wrf_work_dir"
@@ -1045,6 +1060,9 @@ step2_environment_setup() {
             --exclude='./met_em.d*' --exclude='./rsl.out.*' --exclude='./rsl.error.*' \
             --exclude='./*.log' --exclude='./namelist.input' \
             -cf - . | tar -C "${WRF_WORK_DIR}/run" -xf -
+        # Release directories are sealed read-only. Only the copied task
+        # directories become writable; never chmod through executable links.
+        find "${WRF_WORK_DIR}/run" -type d -exec chmod u+rwx {} +
         ln -sfn "${WRF_SOURCE_DIR}/main/real.exe" "${WRF_WORK_DIR}/run/real.exe"
         ln -sfn "${WRF_SOURCE_DIR}/main/wrf.exe" "${WRF_WORK_DIR}/run/wrf.exe"
         check_status "准备最小 WRF 运行文件 (${WRF_SOURCE_DIR}/run → ${WRF_WORK_DIR}/run)" || exit 1
@@ -1170,6 +1188,10 @@ step3_wps_processing() {
  opt_metgrid_tbl_path = './metgrid'
 /
 WPS_EOF
+    if [ -n "${WRF_TASK_CONFIG:-}" ]; then
+        WRF_SOURCE_DIR="$WRF_SOURCE_DIR" WPS_SOURCE_DIR="$WPS_SOURCE_DIR" GEOG_DATA_PATH="$GEOG_DATA_PATH" \
+            python3 "${WRF_SCRIPT_ROOT}/apply_namelist_plan.py" "$WRF_TASK_CONFIG" wps namelist.wps || exit 1
+    fi
     check_status "创建namelist.wps" || exit 1
     log_info "namelist.wps创建完成"
 
@@ -1251,8 +1273,8 @@ WPS_EOF
             ln -sf ungrib/Variable_Tables/Vtable.GFS Vtable
             log_info "Vtable设置完成 (GFS)"
         else
-            log_warn "未找到 Vtable.GFS，回退到 ERA-interim"
-            ln -sf ungrib/Variable_Tables/Vtable.ERA-interim.pl Vtable
+            log_error "缺少专用 Vtable.GFS，拒绝解码 GFS 资料"
+            exit 1
         fi
     elif [ "${WRF_DATA_SOURCE:-gfs}" = "ec" ]; then
         if [ -n "${WRF_EC_VTABLE:-}" ] && [ -f "${WRF_EC_VTABLE}" ]; then
@@ -1434,6 +1456,10 @@ step4_wrf_running() {
     load_runtime_environment
 
     cd ${WRF_WORK_DIR}/run
+    # Keep build identity alongside the run, without asserting an unverified version.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum real.exe wrf.exe > build.sha256 || exit 1
+    fi
     local runtime_free_gb
     runtime_free_gb=$(df -Pk . 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
     if ! [[ "$runtime_free_gb" =~ ^[0-9]+$ ]] || [ "$runtime_free_gb" -lt "${WRF_RUNTIME_PRE_WRF_MIN_FREE_GB:-40}" ]; then
@@ -1448,7 +1474,9 @@ step4_wrf_running() {
     if [ "$max_dom" -gt 1 ]; then
         for lvl in $(seq 2 "$max_dom"); do
             local parent_dx child_dx
-            parent_dx=$(domain_value "WRF_DX" $((lvl - 1)) 27000)
+            local parent_id
+            parent_id=$(domain_value "WRF_PARENT_ID" "$lvl" "$((lvl - 1))")
+            parent_dx=$(domain_value "WRF_DX" "$parent_id" 27000)
             child_dx=$(domain_value "WRF_DX" "$lvl" 9000)
             if [ "$child_dx" -le 0 ] || [ $(( parent_dx % child_dx )) -ne 0 ]; then
                 log_error "无效嵌套分辨率: D0$((lvl - 1))=${parent_dx}m, D0${lvl}=${child_dx}m"
@@ -1475,7 +1503,7 @@ step4_wrf_running() {
             exit 1
         fi
         met_header=$(ncdump -h "$met_sample" 2>/dev/null)
-        met_levels=$(printf '%s\n' "$met_header" | awk '/num_metgrid_levels[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}')
+        met_levels=$(awk '/num_metgrid_levels[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}' <<< "$met_header")
         if [[ "$met_levels" =~ ^[0-9]+$ ]] && [ "$met_levels" -gt 0 ]; then
             export WRF_NUM_METGRID_LEVELS="$met_levels"
             log_info "从 met_em 检测到 num_metgrid_levels=${WRF_NUM_METGRID_LEVELS}"
@@ -1484,8 +1512,8 @@ step4_wrf_running() {
             exit 1
         fi
 
-        met_st_levels=$(printf '%s\n' "$met_header" | awk '/num_st_layers[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}')
-        met_sm_levels=$(printf '%s\n' "$met_header" | awk '/num_sm_layers[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}')
+        met_st_levels=$(awk '/num_st_layers[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}' <<< "$met_header")
+        met_sm_levels=$(awk '/num_sm_layers[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}' <<< "$met_header")
         if ! [[ "$met_st_levels" =~ ^[0-9]+$ ]] || ! [[ "$met_sm_levels" =~ ^[0-9]+$ ]]; then
             log_error "met_em 缺少土壤层维度；GFS 文件可能不是 NOAA 完整文件"
             exit 1
@@ -1495,6 +1523,20 @@ step4_wrf_running() {
             exit 1
         fi
         export WRF_NUM_METGRID_SOIL_LEVELS="$met_st_levels"
+        # Validate each domain/time header before real.exe, not just one sample.
+        local met_file met_domain expected_we expected_sn actual_we actual_sn
+        for met_file in met_em.d0*; do
+            met_header=$(ncdump -h "$met_file" 2>/dev/null) || { log_error "Unreadable met_em: $met_file"; exit 1; }
+            met_domain=${met_file#met_em.d}; met_domain=${met_domain%%.*}; met_domain=$((10#$met_domain))
+            expected_we=$(domain_value WRF_E_WE "$met_domain" 100)
+            expected_sn=$(domain_value WRF_E_SN "$met_domain" 100)
+            actual_we=$(awk '/west_east[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}' <<< "$met_header")
+            actual_sn=$(awk '/south_north[[:space:]]*=/ {gsub(/[^0-9]/,"",$0); print; exit}' <<< "$met_header")
+            if [ "$actual_we" != "$((expected_we - 1))" ] || [ "$actual_sn" != "$((expected_sn - 1))" ]; then
+                log_error "Input/namelist grid SIZE MISMATCH: $met_file"
+                exit 1
+            fi
+        done
         log_info "从 met_em 检测到 num_metgrid_soil_levels=${WRF_NUM_METGRID_SOIL_LEVELS}（温度/湿度均为 4 层）"
     else
         log_error "未找到 ncdump，无法校验 met_em 大气和土壤层数"
@@ -1546,6 +1588,13 @@ step4_wrf_running() {
     done
     alignment_seconds=$divisor
     TIME_STEP=$(select_time_step_for_forcing "$WRF_DX" "$alignment_seconds")
+    if [ -n "${WRF_TIME_STEP_SECONDS:-}" ]; then
+        if ! [[ "$WRF_TIME_STEP_SECONDS" =~ ^[0-9]+$ ]] || [ "$WRF_TIME_STEP_SECONDS" -lt 1 ] || [ "$WRF_TIME_STEP_SECONDS" -gt "$TIME_STEP" ] || [ $((alignment_seconds % WRF_TIME_STEP_SECONDS)) -ne 0 ]; then
+            log_error "Explicit time step is invalid or incompatible with input/output intervals"
+            exit 1
+        fi
+        TIME_STEP="$WRF_TIME_STEP_SECONDS"
+    fi
     if [ "$TIME_STEP" -lt "$CFL_TIME_STEP" ]; then
         log_info "外层分辨率: ${WRF_DX}m, 原始 CFL 时间步=${CFL_TIME_STEP}s；${WRF_FORECAST_FILE_INTERVAL_HOURS}小时驱动间隔要求整除，采用 time_step=${TIME_STEP}s"
     else
@@ -1600,8 +1649,7 @@ step4_wrf_running() {
     WRF_SURFACE=$(csv_repeat "${WRF_SF_SURFACE_PHYSICS:-2}")
     WRF_RADT=$(csv_repeat "${WRF_RADT:-5}")
     WRF_URBAN=${WRF_SF_URBAN_PHYSICS_BY_DOMAIN:-$(csv_repeat "${WRF_SF_URBAN_PHYSICS:-0}")}
-    # 高分路线的 ndown 需要普通 WRF 在每个业务时次保留可核验的重启场。
-    # 允许专项试验覆盖，但业务默认固定为 1 小时。
+    # Preserve restart checkpoints within this task attempt only.
     WRF_RESTART_INTERVAL=${WRF_RESTART_INTERVAL_MINUTES:-60}
     if ! [[ "$WRF_RESTART_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
         log_error "WRF_RESTART_INTERVAL_MINUTES 必须是正整数分钟"
@@ -1739,6 +1787,11 @@ step4_wrf_running() {
  nio_groups                          = 1
  /
 WRF_EOF
+    if [ -n "${WRF_TASK_CONFIG:-}" ]; then
+        WRF_SOURCE_DIR="$WRF_SOURCE_DIR" WPS_SOURCE_DIR="$WPS_SOURCE_DIR" \
+            WRF_NUM_METGRID_LEVELS="$WRF_NUM_METGRID_LEVELS" WRF_NUM_METGRID_SOIL_LEVELS="$WRF_NUM_METGRID_SOIL_LEVELS" \
+            python3 "${WRF_SCRIPT_ROOT}/apply_namelist_plan.py" "$WRF_TASK_CONFIG" input namelist.input || exit 1
+    fi
     check_status "创建namelist.input" || exit 1
     log_info "namelist.input创建完成"
     rm -f real.log wrf.log rsl.out.* rsl.error.* wrfinput_d0* wrfbdy_d01 wrffdda_d0*

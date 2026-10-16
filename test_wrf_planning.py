@@ -11,6 +11,28 @@ from planning import PlanningAssessRequest, assess
 
 
 class PlanningTest(unittest.TestCase):
+    def test_generated_nests_cover_aoi_at_requested_finest_resolution(self):
+        for count in (1, 2, 3, 4):
+            for ratio in (3, 5):
+                if 1000 * ratio ** (count - 1) > 50000:
+                    continue
+                result = preview_domains(DomainPreviewRequest.model_validate({
+                    "aoi": {"west": 115.5, "east": 116, "south": 33.6, "north": 34},
+                    "resolution_m": 1000, "domain_count": count, "nesting_ratio": ratio,
+                }))
+                self.assertEqual(len(result["domains"]), count)
+                self.assertEqual(result["domains"][-1]["dx"], 1000)
+                self.assertTrue(result["finest_aoi_covered"])
+                for domain in result["domains"][1:]:
+                    self.assertEqual((domain["e_we"] - 1) % ratio, 0)
+                    self.assertEqual(domain["parent_grid_ratio"], ratio)
+
+    def test_impossible_nesting_is_rejected_not_silently_downgraded(self):
+        with self.assertRaises(ValueError):
+            preview_domains(DomainPreviewRequest.model_validate({
+                "aoi": {"west": 115.5, "east": 116, "south": 33.6, "north": 34},
+                "resolution_m": 9000, "domain_count": 4, "nesting_ratio": 3,
+            }))
     @staticmethod
     def four_domains():
         return {
@@ -90,6 +112,9 @@ class PlanningTest(unittest.TestCase):
             payload["edit"] = {"operation": "draw", "domain_id": f"d0{index + 1}", "bounds": bounds}
             result = preview_domains(DomainPreviewRequest.model_validate(payload))
             child = result["domains"][index]
+            self.assertEqual(result["center"], initial["center"])
+            self.assertEqual(result["domains"][:index], initial["domains"][:index])
+            self.assertEqual(result["boundaries"][:index], initial["boundaries"][:index])
             self.assertEqual((child["e_we"] - 1) % 3, 0)
             self.assertEqual((child["e_sn"] - 1) % 3, 0)
             self.assertTrue(result["adjustments"])

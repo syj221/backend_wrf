@@ -7,6 +7,7 @@ cycle="${1:-}"
 horizon="${2:-72}"
 requested="${3:-}"
 intent="${4:-prefetch}"
+reference="${5:-}"
 root="${WRF_EC_DATA_ROOT:-${WRF_HPC_EC_DIR:-/home/tx-lab/.wrf-data/WRFwork/DATA/ECMWF}}"
 template="${WRF_EC_URL_TEMPLATE:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -39,5 +40,7 @@ common=(
   --history-retention-days "${WRF_POOL_HISTORY_RETENTION_DAYS:-30}"
 )
 if [[ -n "$template" ]]; then common+=(--ec-template "$template"); fi
-python3 "$queue_script" enqueue "${common[@]}" --cycle "$cycle" --hours "$requested" --priority "$intent"
+reference_args=()
+if [[ -n "$reference" ]]; then reference_args=(--reference "$reference"); fi
+python3 "$queue_script" enqueue "${common[@]}" --cycle "$cycle" --hours "$requested" --priority "$intent" "${reference_args[@]}"
 nohup python3 "$queue_script" worker "${common[@]}" >> "${root}/logs/pool_worker.out" 2>&1 < /dev/null &

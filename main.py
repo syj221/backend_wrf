@@ -2,35 +2,52 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import json
+import logging
+import uuid
+import threading
+import time
 from typing import Any
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response, JSONResponse
 
 from config import settings
 from auth import install_auth
 from database import TaskStore
 from gfs import GfsManager
 from hpc import HpcClient, HpcError
-from recommendations import RecommendationManager
 from static_access import allow_run_asset
+from legacy_display import corrected_display
+from product_snapshot import ProductSnapshotError, product_identity, read_frame
+from runtime_assets import RuntimeStaticFiles
 from domain_preview import DomainPreviewRequest, preview_domains
 from planning import PlanningAssessRequest, assess as assess_plan
+from guidance import configuration_rules, RULESET
+from recovery import RecoveryService
+from request_validation import validate_ordinary_request
+from runtime_release import readiness, require_ready, MpiConfigurationError
+from namelist_config import catalog as namelist_catalog, resolve as resolve_namelist
+from configuration_profile import definition as configuration_definition, normalize as normalize_common
 from schemas import (
+    PHYSICS_SUPPORTED_SCHEMES,
     FIXED_SPINUP_HOURS,
     HpcAuthRequest,
     RemoteGfsCleanupRequest,
     RemoteGfsTriggerRequest,
     TaskDeleteRequest,
-    WrfRecommendationRequest,
     WrfTaskCreate,
     WrfTaskRestartRequest,
     normalize_task_request,
 )
+from task_deletion import TaskDeletionService
+from forcing_policy import policy_update, request_download, cancel_download, observe_download
+from forcing_cleanup import ForcingCleanupService
 from task_manager import TaskConflictError, TaskNotFoundError, WrfTaskManager
-from downscale import DownscaleService, build_router as build_downscale_router
-from downscale.runner import DownscaleRunner
+from downscale_retired import RetiredDownscaleQuery, RetiredStateError, build_retired_router
 from wrf_evidence_api import router as wrf_evidence_router
 
 
@@ -39,14 +56,53 @@ store = TaskStore(settings.database_path)
 gfs_manager = GfsManager(settings)
 hpc_client = HpcClient(settings)
 task_manager = WrfTaskManager(settings, store, gfs_manager, hpc_client)
-recommendation_manager = RecommendationManager(settings, hpc_client)
+retired_downscale_query = RetiredDownscaleQuery(settings.downscale_database_path)
+deletion_service = TaskDeletionService(settings, store, hpc_client, task_manager._operation_lock)
+forcing_cleanup_service = ForcingCleanupService(task_manager,deletion_service.queue)
+task_manager.forcing_cleanup_service=forcing_cleanup_service
+recovery_service = RecoveryService(task_manager, runtime_provider=lambda: namelist_runtime(timeout=12),
+                                   runtime_verifier=lambda: namelist_runtime(force=True, timeout=20))
+_guidance_pool_lock = threading.Lock()
+_guidance_pool: dict[str, Any] = {"sampled_at": 0, "data": None}
+_namelist_runtime: dict[str, Any] = {"sampled_at": 0, "data": None}
+_namelist_lock = threading.Lock()
+
+
+def namelist_runtime(force=False, timeout=45):
+    import shlex
+    from pathlib import Path
+    if not _namelist_lock.acquire(timeout=1 if timeout < 45 else timeout):
+        return None
+    try:
+        if force or time.time() - _namelist_runtime["sampled_at"] > 300:
+            try:
+                script = (Path(__file__).parent / "scripts/namelist_source_probe.py").read_text()
+                raw = hpc_client.run(shlex.quote(settings.hpc_runtime_python) + " -B -c " + shlex.quote(script) + " " + shlex.quote(settings.hpc_wrf_source_dir) + " " + shlex.quote(settings.hpc_wps_source_dir) + " " + shlex.quote(hpc_client.service_dir()), timeout=timeout)
+                evidence = json.loads(raw)
+                _namelist_runtime.update(data={k: evidence.get(k) for k in ("source_hash", "binary_hashes", "generator_hashes")}, sampled_at=time.time())
+            except Exception:
+                _namelist_runtime.update(data=None, sampled_at=time.time())
+        return _namelist_runtime["data"]
+    finally:
+        _namelist_lock.release()
+
+
+class RecoveryPlanRequest(BaseModel):
+    event_id: str | None = None
+    purpose: Literal["repair", "manual"] = "repair"
+    action: Literal["resume", "retry_outputs", "render_partial", "restart", "reduce_time_step", "regenerate_plan"]
+    request: WrfTaskCreate | None = None
+
+
+class RecoveryConfirmation(BaseModel):
+    confirmed: Literal[True]
 
 
 def allow_wrf_asset(path: str, user: dict[str, Any]) -> bool:
     """Only task owners may read unpublished run assets."""
     def lookup(task_id: str) -> dict[str, Any] | None:
         if task_id.startswith("ds_"):
-            return downscale_service.store.get(task_id)
+            return downscale_asset_owner(task_id)
         try:
             return task_manager.get(task_id)
         except TaskNotFoundError:
@@ -55,68 +111,33 @@ def allow_wrf_asset(path: str, user: dict[str, Any]) -> bool:
     return allow_run_asset(path, user, lookup)
 
 
-def lookup_normal_wrf_task(task_id: str, owner_sub: str, owner_role: int) -> dict[str, Any] | None:
+def downscale_asset_owner(task_id: str) -> dict[str, Any] | None:
     try:
-        task = task_manager.get(task_id)
-    except TaskNotFoundError:
-        return None
-    if owner_role < 3 and task.get("owner_sub") != owner_sub:
-        return None
-    return task
-
-
-def lookup_normal_wrf_artifact(task_id: str, owner_sub: str, owner_role: int) -> dict[str, Any] | None:
-    """Return a remote native-file inventory after the normal task ACL gate."""
-    if lookup_normal_wrf_task(task_id, owner_sub, owner_role) is None:
-        return None
-    try:
-        return hpc_client.inspect_wrf_source(task_id)
-    except (HpcError, ValueError) as exc:
-        return {"error": str(exc), "files": []}
-
-
-def lookup_downscale_forcing_manifest(task: dict[str, Any]) -> dict[str, Any] | None:
-    """Refresh a completed forcing manifest when it predates local caching."""
-    runtime = task.get("runtime") or {}
-    output_dir = str(runtime.get("remote_output_dir") or ((runtime.get("forcing") or {}).get("remote_output_dir") or ""))
-    if not output_dir:
-        return None
-    try:
-        return hpc_client.inspect_downscale_forcing_manifest(output_dir)
-    except (HpcError, ValueError, json.JSONDecodeError):
+        return retired_downscale_query.lookup(task_id)
+    except RetiredStateError:
+        # Unreadable ownership evidence never grants access to a legacy asset.
         return None
 
 
-def submit_auto_normal_wrf_task(request: dict[str, Any], owner_sub: str, idempotency_key: str | None) -> dict[str, Any]:
-    """Create the 1 km upstream task for a one-click high-resolution run."""
-    if idempotency_key:
-        return task_manager.submit_idempotent(request, owner_sub, idempotency_key)
-    return task_manager.submit(request, owner_sub)
 
 
-downscale_service = DownscaleService(
-    settings,
-    normal_task_lookup=lookup_normal_wrf_task,
-    source_artifact_lookup=lookup_normal_wrf_artifact,
-    forcing_manifest_lookup=lookup_downscale_forcing_manifest,
-    normal_task_submit=submit_auto_normal_wrf_task,
-    normal_task_cancel=task_manager.cancel,
-)
-downscale_runner = DownscaleRunner(settings, downscale_service, hpc_client)
+
+
+
+
+
+
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     task_manager.start()
-    if settings.downscale_runner_enabled:
-        downscale_runner.start()
     try:
         yield
     finally:
-        downscale_runner.stop()
         task_manager.stop()
-        recommendation_manager.stop()
-        downscale_service.close()
+        deletion_service.close()
+        forcing_cleanup_service.close()
         store.close()
 
 
@@ -130,10 +151,10 @@ app = FastAPI(
 install_auth(
     app,
     [
-        ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2}),
+        ("/api/wrf/tasks", {"GET": 1, "POST": 2, "DELETE": 2, "PATCH": 2}),
         ("/api/wrf/submissions", {"GET": 1}),
-        # 专业高分配置可由所有已登录 WRF 用户提交；资产与认证审核
-        # 仍在 downscale router 内强制要求管理员角色。
+        ("/api/wrf/namelist", {"GET": 1, "POST": 1}),
+        # Retired queries remain authenticated; no legacy writes are dispatched.
         ("/api/wrf/downscale", {"GET": 1, "POST": 1, "DELETE": 1}),
         ("/api/wrf/workbench/tasks", {"GET": 1}),
         ("/api/wrf/data-status", {"GET": 1, "*": 2}),
@@ -142,6 +163,7 @@ install_auth(
         ("/api/wrf/recommendations", {"GET": 1, "*": 2}),
         ("/api/wrf/evidence", {"GET": 2, "POST": 2}),
         ("/api/wrf/options", {"GET": 1, "*": 2}),
+        ("/api/wrf/readiness", {"GET": 1, "*": 3}),
         ("/api/wrf/planning/assess", {"POST": 1}),
         ("/api/wrf/domains/preview", {"POST": 1}),
         ("/api/wrf/hpc", 2),
@@ -158,7 +180,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/data/WRF", StaticFiles(directory=settings.output_dir), name="wrf-data")
+app.mount("/data/WRF", RuntimeStaticFiles(settings, lambda task_id: store.get(task_id) if task_id.startswith("wrf_") else downscale_asset_owner(task_id)), name="wrf-data")
 
 
 def ok(data: Any = None, message: str = "success") -> dict[str, Any]:
@@ -179,11 +201,31 @@ def _viewer(request: Request) -> tuple[str, int]:
 
 def _normal_visible_tasks(request: Request, limit: int) -> list[dict[str, Any]]:
     owner_sub, role = _viewer(request)
-    return task_manager.list(limit, None if role >= 3 else owner_sub)
+    archived = None if request.query_params.get("include_archived") == "true" else request.query_params.get("archived", "false").lower() == "true"
+    page = store.page(limit, None if role >= 3 else owner_sub, archived=archived,
+                      **({"cursor":request.query_params["cursor"]} if request.query_params.get("cursor") else {}))
+    if request.query_params.get("paginated") == "true":
+        return {**page,"active_items":[task for task in store.active()
+            if role >= 3 or task.get("owner_sub") == owner_sub]}
+    return page["items"]
 
 
-app.include_router(build_downscale_router(downscale_service, _viewer, _normal_visible_tasks))
+app.include_router(build_retired_router(retired_downscale_query, _viewer, _normal_visible_tasks))
 app.include_router(wrf_evidence_router)
+
+
+@app.middleware("http")
+async def retired_features(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/wrf/recommendations"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=410, content={"detail": "该功能已退役，请使用普通 WRF 工作台。"})
+    return await call_next(request)
+
+
+@app.get("/api/wrf/readiness")
+def runtime_readiness(refresh: bool = False):
+    return ok(readiness(hpc_client, settings, force=refresh))
 
 
 def get_visible_task(task_id: str, request: Request) -> dict[str, Any]:
@@ -200,10 +242,21 @@ def root() -> dict[str, Any]:
     return ok({"service": "backend_wrf", "docs": "/docs"})
 
 
+@app.get("/api/health/activity")
+def local_activity() -> dict[str, Any]:
+    """Local shutdown guard only; never refresh SSH or expose private task IDs."""
+    return ok({
+        "schema": "wrf-local-activity-1",
+        "active_task_count": task_manager.active_task_count,
+        "queue_size": task_manager.queue_size,
+        "downscale_active": retired_downscale_query.local_activity()["downscale_active"],
+    })
+
+
 @app.get("/api/health")
-def health() -> dict[str, Any]:
+def health(cached: bool = False) -> dict[str, Any]:
     hpc_health = task_manager.hpc_health
-    if hpc_health.get("status") != "ready":
+    if not cached and hpc_health.get("status") != "ready":
         hpc_health = task_manager.refresh_hpc_health()
     hpc_health["transfer"] = hpc_client.transfer_status
     hpc_health["ssh_port"] = settings.hpc_port
@@ -216,6 +269,10 @@ def health() -> dict[str, Any]:
             "active_task_ids": task_manager.active_task_ids,
             "active_task_count": task_manager.active_task_count,
             "scheduling_mode": "dynamic",
+            "max_concurrent_tasks": settings.ordinary_max_concurrent,
+            "resource_policy": {"cpu_headroom": settings.compute_cpu_headroom,
+                                "memory_headroom_bytes": settings.compute_memory_headroom_bytes,
+                                "reservation": "per_task_cpu_memory"},
             "hpc": hpc_health,
             "gfs": {
                 "mode": "tx_lab_remote_pool",
@@ -228,9 +285,10 @@ def health() -> dict[str, Any]:
             },
             "forcing": {"mode": "tx_lab_remote_pool", "data_sources": ["gfs", "ecmwf"]},
             "downscale": {
-                "runner_enabled": settings.downscale_runner_enabled,
-                "active_task_id": downscale_runner.active_task_id,
-                "stage_boundary": "normal_wrf_source_handoff",
+                "retired": True,
+                "runner_enabled": False,
+                "active_task_id": None,
+                "stage_boundary": "retired_readonly",
             },
         }
     )
@@ -242,13 +300,15 @@ def options() -> dict[str, Any]:
         {
             "capabilities": {
                 "data_sources": ["GFS", "ECMWF"],
+                "configuration_schema": "wrf-composer-2",
                 "execution_modes": ["TX_LAB"],
                 "max_domains": 4,
-                "scheduling_mode": "dynamic",
+                "scheduling_mode": "persistent_serial_queue",
                 "runtime_profiles": ["cpu"],
                 "default_runtime_profile": "cpu",
-                "fixed_spinup_hours": FIXED_SPINUP_HOURS,
-                "fixed_vertical_levels": 88,
+                "default_spinup_hours": 6,
+                "default_vertical_levels": 88,
+                "vertical_levels_range": [10, 500],
                 "fixed_forecast_focus": "general",
                 "gfs_cycle_hours": [0],
                 "gfs_cycle_policy": "latest_covering_00z",
@@ -256,13 +316,10 @@ def options() -> dict[str, Any]:
                 "gfs_scope": "global",
                 "gfs_bounds": hpc_client.gfs_bounds,
                 "gfs_download_mode": "hpc_remote_nomads_grib_filter",
-                "gfs_storage_path": settings.hpc_gfs_dir,
                 "ecmwf_cycle_hours": [0],
                 "ecmwf_cycle_policy": "latest_covering_00z",
                 "ecmwf_product": "ecmwf-ifs-0p25",
                 "ecmwf_download_mode": "tx_lab_remote_full_file",
-                "ecmwf_storage_path": settings.hpc_ec_dir,
-                "gfs_storage_mount": settings.hpc_gfs_mount,
                 "gfs_min_free_gb": settings.hpc_gfs_min_free_gb,
                 "gfs_request_interval_seconds": settings.hpc_gfs_request_interval_seconds,
                 "gfs_prefetch_enabled": settings.hpc_gfs_prefetch_enabled,
@@ -273,16 +330,22 @@ def options() -> dict[str, Any]:
                 "gfs_slow_seconds": settings.hpc_gfs_slow_seconds,
                 "hpc_transfer_mode": settings.hpc_transfer_mode,
                 "hpc_import_legacy_gfs": settings.hpc_import_legacy_gfs,
-                "downscale_runner_enabled": settings.downscale_runner_enabled,
-                "downscale_runner_poll_seconds": settings.downscale_runner_poll_seconds,
+                "downscale_retired": True,
             },
             "forecast_intervals": [1, 3, 6],
+            "configuration_profile": configuration_definition(namelist_catalog()["capability_id"]),
             "history_intervals_minutes": [10, 30, 60, 180, 360],
             "capability_version": "wrf-ordinary-2",
+            "workbench_management": {"id": "wrf-workbench-management-1",
+                "interaction_revision":"workbench-simplification-3", "async_deletion":True, "include_archived":True,
+                "direct_deletion":True,"forcing_refresh":True,"forcing_cycle_deletion":True,"directory_quarantine":True},
+            "recovery_capability": {"schema_version": "wrf-diagnosis-1", "plan_version": "wrf-recovery-2",
+                                    "diagnosis": True, "regenerate_plan": True},
+            "namelist_capability": {k: namelist_catalog()[k] for k in ("schema_version", "source_hash", "capability_id", "wrf_version", "wps_version")},
             "field_descriptions": {
                 "forecast_interval_hours": "边界资料周期（小时），不是产品输出间隔。",
                 "history_interval_minutes": "模拟产品输出周期（分钟），全域统一。",
-                "center": "计算域参考点，需由用户确认。",
+                "center": "计算域参考点；明确坐标可直接编辑，提交时校验投影边界。",
                 "domains": "d01–d04 嵌套域；子域网格距与父域比为 3 或 5。",
             },
             "assimilation_schemes": [
@@ -291,18 +354,12 @@ def options() -> dict[str, Any]:
                 {"value": "fdda_standard", "label": "标准网格松弛"},
                 {"value": "fdda_strong", "label": "强网格松弛"},
             ],
+            "physics_options": {name: sorted(values) for name, values in PHYSICS_SUPPORTED_SCHEMES.items()},
             "physics_presets": {
-                "默认通用": {"mp_physics": 8, "cu_physics": 0, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 1, "sf_sfclay_physics": 1, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
-                "热带对流": {"mp_physics": 6, "cu_physics": 5, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 1, "sf_sfclay_physics": 1, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
-                "冬季降雪": {"mp_physics": 16, "cu_physics": 0, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 2, "sf_sfclay_physics": 2, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
+                "默认通用": {"mp_physics": 8, "cu_physics": 3, "ra_lw_physics": 4, "ra_sw_physics": 4, "bl_pbl_physics": 1, "sf_sfclay_physics": 1, "sf_surface_physics": 2, "sf_urban_physics": 0, "num_soil_layers": 4, "num_land_cat": 21, "radt": 5},
             },
-            "default_domain_count": 1,
-            "default_domains": [
-                {"id": "d01", "dx": 27000, "dy": 27000, "e_we": 100, "e_sn": 79, "parent_id": 0, "parent_grid_ratio": 1, "i_parent_start": 1, "j_parent_start": 1},
-                {"id": "d02", "dx": 9000, "dy": 9000, "e_we": 79, "e_sn": 61, "parent_id": 1, "parent_grid_ratio": 3, "i_parent_start": 11, "j_parent_start": 11},
-                {"id": "d03", "dx": 3000, "dy": 3000, "e_we": 64, "e_sn": 46, "parent_id": 2, "parent_grid_ratio": 3, "i_parent_start": 6, "j_parent_start": 6},
-                {"id": "d04", "dx": 1000, "dy": 1000, "e_we": 55, "e_sn": 40, "parent_id": 3, "parent_grid_ratio": 3, "i_parent_start": 6, "j_parent_start": 6},
-            ],
+            "default_domain_count": 0,
+            "default_domains": [],
         }
     )
 
@@ -312,8 +369,8 @@ def data_status() -> dict[str, Any]:
     try:
         pool_items: list[dict[str, Any]] = []
         status_priority = {
-            "failed": 5, "error": 5, "rate_limited": 4, "downloading": 3,
-            "retry_wait": 4, "waiting_publish": 2, "partial": 2, "ready": 1, "idle": 0,
+            "failed": 6, "error": 6, "rate_limited": 5, "downloading": 4,
+            "retry_wait": 5, "queued": 3, "waiting_publish": 2, "partial": 1, "ready": 1, "idle": 0,
         }
         overall = "idle"
         hpc_health = task_manager.hpc_health
@@ -323,6 +380,8 @@ def data_status() -> dict[str, Any]:
                 data_source=source,
             )
             active_cycles = task_manager.active_forcing_cycles(source)
+            reference_counts = task_manager.task_forcing_reference_counts(source)
+            download_counts = store.forcing_download_reference_counts(source)
             retained_cycles = task_manager.retained_gfs_cycles() if source == "gfs" else set()
             items = hpc_client.forcing_pool_items(
                 source,
@@ -334,7 +393,9 @@ def data_status() -> dict[str, Any]:
                     overall = str(item.get("status"))
                 for cycle in item.get("cycles") or []:
                     key = str(cycle.get("cycle") or "")
-                    cycle["task_required"] = key in active_cycles
+                    cycle["task_required"] = reference_counts.get(key, 0) > 0
+                    cycle["task_reference_count"] = reference_counts.get(key, 0)
+                    cycle["download_reference_count"] = download_counts.get(key, 0)
                     cycle["retained"] = key in retained_cycles
                     cycle["prefetch_target"] = key in target_cycles
             pool_items.extend(items)
@@ -355,7 +416,25 @@ def data_status() -> dict[str, Any]:
 
 @app.post("/api/wrf/planning/assess")
 def planning_assess(payload: PlanningAssessRequest) -> dict[str, Any]:
-    return ok(assess_plan(payload, task_manager.hpc_health))
+    with _guidance_pool_lock:
+        if time.time() - _guidance_pool["sampled_at"] > 60:
+            _guidance_pool.update(sampled_at=time.time(), data=data_status()["data"])
+        pool = {**(_guidance_pool["data"] or {}), "sampled_at": _guidance_pool["sampled_at"]}
+    return ok(assess_plan(payload, {**task_manager.hpc_health, "queue_size": task_manager.queue_size,
+        "active_task_count": task_manager.active_task_count}, pool))
+
+
+@app.get("/api/wrf/namelist/catalog")
+def get_namelist_catalog():
+    return ok(namelist_catalog())
+
+
+@app.post("/api/wrf/namelist/resolve")
+def namelist_resolve(payload: dict[str, Any]):
+    try:
+        return ok(resolve_namelist(payload, strict=False))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/wrf/domains/preview")
@@ -370,11 +449,34 @@ def domains_preview(payload: DomainPreviewRequest) -> dict[str, Any]:
 def prepare_all_forcing() -> dict[str, Any]:
     """Check GFS and ECMWF pools and start missing forecast downloads."""
     try:
-        gfs = task_manager.sync_latest_gfs()
+        gfs = task_manager.sync_latest_gfs(cleanup_old_cycles=False)
         ec = sync_latest_remote_forcing("ecmwf").get("data") or {}
         return ok({"providers": {"gfs": gfs, "ecmwf": ec}})
     except (ValueError, HpcError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/refresh", status_code=202)
+def refresh_forcing_pool(request: Request):
+    actor, role = _viewer(request)
+    return ok(forcing_cleanup_service.refresh_async(actor,role))
+
+
+@app.get("/api/wrf/forcing/refresh")
+def forcing_refresh_status(request: Request):
+    _viewer(request)
+    return ok(forcing_cleanup_service.refresh_status())
+
+
+@app.post("/api/wrf/forcing/{source}/cycles/{cycle}/delete",status_code=202)
+def delete_forcing_cycle(source: str, cycle: str, request: Request):
+    actor,role=_viewer(request)
+    if role<3:
+        raise HTTPException(403,"共享资料删除仅管理员可操作")
+    try:
+        return ok(forcing_cleanup_service.delete_cycle_async(source,cycle,actor))
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from None
 
 
 @app.post("/api/wrf/forcing/{data_source}/sync-latest", status_code=202)
@@ -391,19 +493,128 @@ def sync_latest_remote_forcing(data_source: str) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
-@app.post("/api/wrf/forcing/{data_source}/cleanup")
-def cleanup_remote_forcing(data_source: str, request: RemoteGfsCleanupRequest) -> dict[str, Any]:
-    source = gfs_manager.normalize_source(data_source)
-    target_cycles = gfs_manager.latest_cycles(count=settings.hpc_gfs_retained_cycles, data_source=source)
+class ForcingPolicyPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    version: int = Field(ge=0)
+    enabled: bool
+    auto_cleanup: bool
+    held_cycles: dict[str, list[str]]
+
+
+class ForcingDownloadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source: Literal["gfs", "ecmwf"]
+    cycle: str = Field(min_length=10, max_length=10)
+    start_hour: int = Field(ge=0, le=72)
+    end_hour: int = Field(ge=0, le=72)
+
+
+@app.get("/api/wrf/forcing/policy")
+def get_forcing_policy():
+    return ok(store.forcing_policy(settings.hpc_gfs_prefetch_enabled))
+
+
+@app.patch("/api/wrf/forcing/policy")
+def patch_forcing_policy(payload: ForcingPolicyPatch, request: Request):
+    if _viewer(request)[1] < 3:
+        raise HTTPException(403, "资料策略仅管理员可修改")
     try:
-        result = hpc_client.cleanup_forcing_cycles(
-            source, request.paths, target_cycles, task_manager.active_forcing_cycles(source)
-        )
-        return ok(result, message=f"已清理确认的 tx-lab 旧 {source.upper()} 周期")
+        return ok(policy_update(store, task_manager, hpc_client, settings, **payload.model_dump()))
+    except (ValueError, HpcError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/downloads", status_code=202)
+def submit_forcing_download(payload: ForcingDownloadRequest, request: Request):
+    actor, _ = _viewer(request)
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        raise HTTPException(422,"资料下载需要 Idempotency-Key")
+    try:
+        return ok(request_download(store,hpc_client,actor,payload.source,payload.cycle,payload.start_hour,payload.end_hour,key=key))
+    except (ValueError,HpcError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.get("/api/wrf/forcing/downloads/{operation_id}")
+def get_forcing_download(operation_id: str, request: Request):
+    operation=store.forcing_operation(operation_id)
+    actor,role=_viewer(request)
+    if not operation or (role<3 and operation["owner_sub"]!=actor):
+        raise HTTPException(404,"下载操作不存在")
+    return ok(observe_download(store,hpc_client,operation))
+
+
+@app.get("/api/wrf/forcing/downloads")
+def list_forcing_downloads(request: Request, limit: int = Query(default=50,ge=1,le=100)):
+    actor, role = _viewer(request)
+    return ok({"items":store.list_forcing_operations(None if role>=3 else actor,limit)})
+
+
+@app.post("/api/wrf/forcing/downloads/{operation_id}/cancel")
+def cancel_forcing_download(operation_id: str, request: Request):
+    operation=store.forcing_operation(operation_id)
+    actor,role=_viewer(request)
+    if not operation or (role<3 and operation["owner_sub"]!=actor):
+        raise HTTPException(404,"下载操作不存在")
+    try:
+        result = cancel_download(store,hpc_client,operation)
+        task_manager._forcing_cleanup_wakeup.set()
+        return ok(result)
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except HpcError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+        raise HTTPException(409,str(exc)) from None
+
+
+@app.get("/api/wrf/forcing/{data_source}/cleanup-preview")
+def forcing_cleanup_preview(data_source: str, request: Request):
+    if _viewer(request)[1]<3:
+        raise HTTPException(403,"资料清理仅管理员可预览")
+    return ok(forcing_cleanup_service.preview(data_source))
+
+
+class ForcingCleanupConfirmation(BaseModel):
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+@app.post("/api/wrf/forcing/{data_source}/cleanup-plans")
+def create_forcing_cleanup_plan(data_source: str, request: Request, retention_upgrade: bool = False):
+    actor, role = _viewer(request)
+    if role < 3:
+        raise HTTPException(403,"资料清理仅管理员可操作")
+    try:
+        return ok(forcing_cleanup_service.plan(data_source,actor,retention_upgrade))
+    except (ValueError,HpcError) as exc:
+        raise HTTPException(409,str(exc)) from None
+
+
+@app.get("/api/wrf/forcing/cleanup-plans/{plan_id}")
+def get_forcing_cleanup_plan(plan_id: str, request: Request):
+    actor, role = _viewer(request)
+    if role < 3:
+        raise HTTPException(403,"资料清理仅管理员可操作")
+    try:
+        return ok(forcing_cleanup_service.status(plan_id,actor))
+    except ValueError as exc:
+        raise HTTPException(404,str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/cleanup-plans/{plan_id}/execute")
+def execute_forcing_cleanup_plan(plan_id: str, payload: ForcingCleanupConfirmation, request: Request):
+    actor, role = _viewer(request)
+    if role < 3:
+        raise HTTPException(403,"资料清理仅管理员可操作")
+    try:
+        result=forcing_cleanup_service.execute(plan_id,actor,payload.digest)
+        return JSONResponse(status_code=202 if result["status"] in {"checking","executing"} else 200,content=ok(result))
+    except (ValueError,HpcError) as exc:
+        raise HTTPException(409,str(exc)) from None
+
+
+@app.post("/api/wrf/forcing/{data_source}/cleanup")
+def cleanup_remote_forcing(data_source: str, request: RemoteGfsCleanupRequest, http_request: Request) -> dict[str, Any]:
+    if _viewer(http_request)[1] < 3:
+        raise HTTPException(status_code=403, detail="共享资料清理仅限管理员")
+    raise HTTPException(410,"直接资料删除已停用；请创建并确认资料清理计划")
 
 
 @app.post("/api/wrf/forcing/{data_source}/trigger", status_code=202)
@@ -432,79 +643,61 @@ def sync_latest_remote_gfs() -> dict[str, Any]:
 
 
 @app.post("/api/wrf/gfs/cleanup")
-def cleanup_remote_gfs(request: RemoteGfsCleanupRequest) -> dict[str, Any]:
-    target_cycles = gfs_manager.latest_cycles()
-    try:
-        result = hpc_client.cleanup_gfs_cycles(
-            request.paths,
-            target_cycles,
-            task_manager.protected_gfs_cycles(),
-        )
-        return ok(result, message="已清理确认的 tx-lab 旧 GFS 周期")
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except HpcError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+def cleanup_remote_gfs(request: RemoteGfsCleanupRequest, http_request: Request) -> dict[str, Any]:
+    if _viewer(http_request)[1] < 3:
+        raise HTTPException(status_code=403, detail="共享资料清理仅限管理员")
+    raise HTTPException(410,"直接资料删除已停用；请创建并确认资料清理计划")
 
 
 @app.post("/api/wrf/gfs/trigger", status_code=202)
 def trigger_remote_gfs(request: RemoteGfsTriggerRequest) -> dict[str, Any]:
     try:
-        protected_cycles = task_manager.protected_gfs_cycles()
-        auto_cleanup = hpc_client.auto_cleanup_gfs_cycles([request.cycle], protected_cycles)
         result = hpc_client.trigger_gfs_download(request.cycle, 72)
-        result["auto_cleanup"] = auto_cleanup
-        return ok(result, message="tx-lab 共享 GFS 已自动清理并检查下载状态")
+        result["auto_cleanup"] = {"requested": [], "deleted": [], "missing": []}
+        return ok(result, message="GFS 下载请求已检查；资料清理须单独执行")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HpcError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
-@app.post("/api/wrf/recommendations", status_code=202)
-def create_recommendation(request: WrfRecommendationRequest, identity: Request) -> dict[str, Any]:
-    owner_sub, _ = _viewer(identity)
-    return ok(
-        recommendation_manager.submit(request.model_dump(mode="json"), owner_sub),
-        message="已提交 tx-lab geogrid 地理分析",
-    )
 
 
-@app.get("/api/wrf/recommendations/{job_id}")
-def recommendation_detail(job_id: str, request: Request) -> dict[str, Any]:
-    owner_sub, role = _viewer(request)
-    job = recommendation_manager.get(job_id, owner_sub, role)
-    if job is None:
-        raise HTTPException(status_code=404, detail="WRF 参数推荐任务不存在")
-    return ok(job)
 
 
 @app.post("/api/wrf/tasks/validate")
 def validate_task(payload: WrfTaskCreate) -> dict[str, Any]:
-    return ok({"request": normalize_task_request(payload.model_dump(mode="json")),
-               "warnings": ["时间按 UTC 解释；固定 CPU 运行与 6 小时 spin-up",
-                            "已通过配置规则校验；不代表驱动资料和 HPC 当前可用", "计算将消耗资源，需显式确认"]})
+    try:
+        result = validate_ordinary_request(payload.model_dump(mode="json"), runtime=namelist_runtime()
+            if payload.namelist is not None or payload.configuration_profile else None,
+            original_request=payload._provided_request)
+    except ValueError as exc:
+        raise HTTPException(409 if "无法确认当前 WRF/WPS" in str(exc) else 422, str(exc)) from exc
+    return ok(result)
 
 
 @app.post("/api/wrf/tasks", status_code=202)
 def create_task(payload: WrfTaskCreate, request: Request) -> dict[str, Any]:
+    canonical_request = payload.model_dump(mode="json")
+    canonical_request = validate_task(payload)["data"]["request"]
     key = request.headers.get("Idempotency-Key")
     if key and (len(key) > 128 or not all(c.isalnum() or c in "-_" for c in key)):
         raise HTTPException(status_code=422, detail="幂等键格式无效")
-    hpc = task_manager.hpc_health
-    if hpc.get("status") != "ready":
-        hpc = task_manager.refresh_hpc_health()
-    if hpc.get("status") != "ready":
-        raise HTTPException(status_code=503, detail=f"tx-lab 环境未就绪：{hpc.get('message') or hpc.get('status')}")
+    try:
+        require_ready(hpc_client, settings, force=True, request=canonical_request)
+    except MpiConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     owner_sub, _ = _viewer(request)
     if not owner_sub:
         raise HTTPException(status_code=401, detail="Token 缺少用户身份")
     try:
-        task = (task_manager.submit_idempotent(payload.model_dump(mode="json"), owner_sub, key)
-                if key else task_manager.submit(payload.model_dump(mode="json"), owner_sub))
+        task = (task_manager.submit_idempotent(canonical_request, owner_sub, key)
+                if key else task_manager.submit(canonical_request, owner_sub))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return ok(task, message="WRF 任务已开始动态并行调度")
+    return ok(task, message="WRF 任务已进入持久化队列")
 
 
 @app.post("/api/wrf/hpc/auth")
@@ -529,10 +722,37 @@ def authenticate_hpc(request: HpcAuthRequest) -> dict[str, Any]:
     return ok(result, message="tx-lab 认证成功")
 
 
+class TaskMetadataPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    version: int = Field(ge=0)
+    name: str = Field(default="", max_length=120)
+    notes: str = Field(default="", max_length=4000)
+    archived: bool = False
+
+
 @app.get("/api/wrf/tasks")
-def list_tasks(request: Request, limit: int = 50) -> dict[str, Any]:
+def list_tasks(request: Request, limit: int = Query(default=50, ge=1, le=200),
+               search: str = Query(default="", max_length=200),
+               source: Literal["gfs", "ecmwf"] | None = None, status: str | None = None,
+               archived: bool = False, cursor: str | None = Query(default=None, max_length=1024)) -> dict[str, Any]:
     owner_sub, role = _viewer(request)
-    return ok({"items": task_manager.list(limit, None if role >= 3 else owner_sub), "queue_size": task_manager.queue_size})
+    try:
+        page = store.page(limit, None if role >= 3 else owner_sub, search, source, status, archived, cursor)
+        page["items"] = [{**task_manager.get(item["id"]), "metadata": item["metadata"],
+                          "operations": task_manager.operations(item["id"])} for item in page["items"]]
+        return ok({**page, "queue_size": task_manager.queue_size})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@app.patch("/api/wrf/tasks/{task_id}/metadata")
+def task_metadata(task_id: str, payload: TaskMetadataPatch, request: Request):
+    get_visible_task(task_id, request)
+    changes = payload.model_dump(exclude_unset=True, exclude={"version"})
+    try:
+        return ok(store.patch_metadata(task_id, payload.version, changes))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @app.get("/api/wrf/submissions/{key}")
@@ -555,21 +775,90 @@ def submission_status(key: str, request: Request) -> dict[str, Any]:
 
 @app.get("/api/wrf/tasks/{task_id}")
 def task_detail(task_id: str, request: Request) -> dict[str, Any]:
-    return ok(get_visible_task(task_id, request))
+    return ok({**get_visible_task(task_id, request), "metadata": store.metadata(task_id),
+               "operations": task_manager.operations(task_id)})
 
 
 @app.delete("/api/wrf/tasks/{task_id}")
 def delete_task(task_id: str, payload: TaskDeleteRequest, request: Request) -> dict[str, Any]:
+    get_visible_task(task_id, request)
+    raise HTTPException(410, "旧本地删除入口已停用；彻底删除必须通过精确清单事务，当前请使用归档")
+
+
+class TaskDeletionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirmed: Literal[True]
+    digest: str = Field(min_length=64, max_length=64)
+
+
+@app.post("/api/wrf/tasks/{task_id}/delete", status_code=202)
+def task_delete_direct(task_id: str, request: Request):
+    get_visible_task(task_id,request)
+    actor, _ = _viewer(request)
+    bearer = request.headers.get("authorization", "")
+    if not bearer.startswith("Bearer "):
+        raise HTTPException(401,"请重新登录后删除任务")
     try:
-        get_visible_task(task_id, request)
-        result = task_manager.delete_local(task_id, payload.confirm_task_id)
-    except TaskNotFoundError:
-        raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
-    except TaskConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ok(deletion_service.plan_async(task_id,actor,delete_now=True,bearer=bearer[7:]))
+    except (ValueError,RuntimeError,HpcError):
+        raise HTTPException(409,"任务暂不能删除，请稍后重试。") from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/deletion-plans")
+def task_deletion_plan(task_id: str, request: Request, asynchronous: bool = False):
+    get_visible_task(task_id, request)
+    actor, _ = _viewer(request)
+    try:
+        if asynchronous:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=202, content=ok(deletion_service.plan_async(task_id, actor)))
+        return ok(deletion_service.plan(task_id, actor))
+    except (ValueError, RuntimeError, HpcError) as exc:
+        operation_id = uuid.uuid4().hex
+        logging.getLogger(__name__).exception("WRF deletion preview %s failed", operation_id)
+        raise HTTPException(409, {"code": "WRF_TERMINAL_EVIDENCE_UNVERIFIED",
+            "message": "无法核验任务资产或计算会话，请重新核验；未执行删除。",
+            "operation_id": operation_id}) from None
+
+
+@app.get("/api/wrf/tasks/{task_id}/deletion-plans/{plan_id}")
+def task_deletion_status(task_id: str, plan_id: str, request: Request):
+    actor, _ = _viewer(request)
+    try:
+        return ok(deletion_service.status(task_id, plan_id, actor))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(result, message="WRF 本地任务数据已删除")
+        raise HTTPException(404, str(exc)) from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/deletion-plans/{plan_id}/execute")
+def task_deletion_execute(task_id: str, plan_id: str, payload: TaskDeletionConfirmation, request: Request, asynchronous: bool = False):
+    get_visible_task(task_id, request)
+    actor, _ = _viewer(request)
+    bearer = request.headers.get("authorization", "")
+    if not bearer.startswith("Bearer "):
+        raise HTTPException(401, "请重新登录后执行删除")
+    try:
+        with task_manager._operation_lock(task_id):
+            if asynchronous:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=202, content=ok(deletion_service.execute_async(task_id, plan_id, actor, payload.digest, bearer.removeprefix("Bearer "))))
+            return ok(deletion_service.execute(task_id, plan_id, actor, payload.digest, bearer.removeprefix("Bearer ")))
+    except (ValueError, RuntimeError, HpcError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/deletion-plans/{plan_id}/reconcile")
+def task_deletion_reconcile(task_id: str, plan_id: str, payload: RecoveryConfirmation, request: Request):
+    actor, _ = _viewer(request)
+    bearer = request.headers.get("authorization", "")
+    if not bearer.startswith("Bearer "):
+        raise HTTPException(401, "请重新登录后对账")
+    try:
+        with task_manager._operation_lock(task_id):
+            result=deletion_service.reconcile(task_id, plan_id, actor, bearer.removeprefix("Bearer "))
+            return JSONResponse(status_code=202 if result["status"] in {"checking","executing"} else 200,content=ok(result))
+    except (ValueError, RuntimeError, HpcError) as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @app.get("/api/wrf/tasks/{task_id}/logs")
@@ -596,10 +885,77 @@ def cancel_task(task_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
 
 
+@app.get("/api/wrf/tasks/{task_id}/events")
+def task_events(task_id: str, request: Request):
+    get_visible_task(task_id, request)
+    return ok(recovery_service.events(task_id))
+
+
+@app.get("/api/wrf/tasks/{task_id}/diagnosis")
+def task_diagnosis(task_id: str, request: Request, event_id: str | None = None,
+                   attempt_no: int | None = Query(default=None, ge=1), refresh: bool = False):
+    get_visible_task(task_id, request)
+    try:
+        if refresh:
+            return ok(recovery_service.diagnosis(task_id, event_id, attempt_no,
+                runtime=namelist_runtime(force=True, timeout=20), force_refresh=True))
+        return ok(recovery_service.diagnosis(task_id, event_id, attempt_no))
+    except (ValueError, TaskConflictError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/wrf/tasks/{task_id}/recovery-plans")
+def task_recovery_plan(task_id: str, payload: RecoveryPlanRequest, request: Request):
+    get_visible_task(task_id, request)
+    try:
+        return ok(recovery_service.plan(task_id, payload.event_id, payload.action,
+                                       payload.request.model_dump(mode="json") if payload.request else None,
+                                       actor_sub=_viewer(request)[0], purpose=payload.purpose))
+    except (ValueError, TaskConflictError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (HpcError, RuntimeError) as exc:
+        operation_id = uuid.uuid4().hex
+        logging.getLogger(__name__).exception("WRF recovery operation %s failed", operation_id)
+        raise HTTPException(409, {"code": "recovery_evidence_unavailable",
+            "message": "运行证据暂不可核验，请稍后重新检查；未自动重放操作",
+            "operation_id": operation_id}) from None
+
+
+@app.get("/api/wrf/tasks/{task_id}/recovery-plans/{plan_id}")
+def task_recovery_detail(task_id: str, plan_id: str, request: Request):
+    get_visible_task(task_id, request)
+    plan = store.recovery(plan_id)
+    if not plan or plan["task_id"] != task_id:
+        raise HTTPException(404, "恢复计划不存在")
+    return ok(plan)
+
+
+@app.post("/api/wrf/tasks/{task_id}/recovery-plans/{plan_id}/execute")
+def task_recovery_execute(task_id: str, plan_id: str, payload: RecoveryConfirmation, request: Request):
+    get_visible_task(task_id, request)
+    try:
+        return ok(recovery_service.execute(task_id, plan_id, actor_sub=_viewer(request)[0]))
+    except (ValueError, TaskConflictError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (HpcError, RuntimeError) as exc:
+        operation_id = uuid.uuid4().hex
+        logging.getLogger(__name__).exception("WRF recovery operation %s failed", operation_id)
+        raise HTTPException(409, {"code": "recovery_evidence_unavailable",
+            "message": "运行证据暂不可核验，请稍后重新检查；未自动重放操作",
+            "operation_id": operation_id}) from None
+
+
+def get_legacy_recovery_task(task_id: str, request: Request):
+    task = get_visible_task(task_id, request)
+    if task.get("request", {}).get("recovery_policy") == "confirm":
+        raise HTTPException(409, "此任务须先生成操作计划：工作台确认执行，智能体通过原生 ASK 确认；旧接口不可绕过确认")
+    return task
+
+
 @app.post("/api/wrf/tasks/{task_id}/retry", status_code=202)
 def retry_task(task_id: str, request: Request) -> dict[str, Any]:
     try:
-        get_visible_task(task_id, request)
+        get_legacy_recovery_task(task_id, request)
         return ok(task_manager.retry(task_id), message="已在原任务中开始新的运行尝试")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -625,7 +981,7 @@ def task_restart_plan(task_id: str, request: Request) -> dict[str, Any]:
 @app.post("/api/wrf/tasks/{task_id}/restart", status_code=202)
 def restart_task(task_id: str, payload: WrfTaskRestartRequest, request: Request) -> dict[str, Any]:
     try:
-        get_visible_task(task_id, request)
+        get_legacy_recovery_task(task_id, request)
         task = task_manager.restart(
             task_id,
             payload.request.model_dump(mode="json"),
@@ -646,7 +1002,7 @@ def restart_task(task_id: str, payload: WrfTaskRestartRequest, request: Request)
 @app.post("/api/wrf/tasks/{task_id}/resume", status_code=202)
 def resume_task(task_id: str, request: Request) -> dict[str, Any]:
     try:
-        get_visible_task(task_id, request)
+        get_legacy_recovery_task(task_id, request)
         return ok(task_manager.resume_external(task_id), message="已从原任务阶段开始 tx-lab 对账")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -656,6 +1012,7 @@ def resume_task(task_id: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/wrf/tasks/{task_id}/retry-outputs", status_code=202)
 def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
+    get_legacy_recovery_task(task_id, request)
     hpc = task_manager.hpc_health
     if hpc.get("status") != "ready":
         raise HTTPException(
@@ -663,7 +1020,6 @@ def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
             detail=f"tx-lab 环境未就绪：{hpc.get('message') or hpc.get('status')}，请先检查服务器连接",
         )
     try:
-        get_visible_task(task_id, request)
         return ok(task_manager.retry_outputs(task_id), message="已开始结果下载恢复动态调度")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -674,7 +1030,7 @@ def retry_task_outputs(task_id: str, request: Request) -> dict[str, Any]:
 @app.post("/api/wrf/tasks/{task_id}/render-partial", status_code=202)
 def render_partial_outputs(task_id: str, request: Request) -> dict[str, Any]:
     try:
-        get_visible_task(task_id, request)
+        get_legacy_recovery_task(task_id, request)
         return ok(task_manager.render_partial(task_id), message="已确认忽略不可读帧并开始部分渲染动态调度")
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="WRF 任务不存在") from None
@@ -702,7 +1058,10 @@ def task_result(task_id: str, request: Request) -> dict[str, Any]:
     task = get_visible_task(task_id, request)
     if task["status"] not in {"succeeded", "partial_success"} or not task.get("result"):
         raise HTTPException(status_code=409, detail={"message": "WRF 任务尚未完成", "status": task["status"]})
-    return ok(task["result"])
+    try:
+        return ok(corrected_display(task, settings))
+    except ProductSnapshotError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/wrf/tasks/{task_id}/summary")
@@ -716,6 +1075,7 @@ def task_summary(task_id: str, request: Request) -> dict[str, Any]:
                               for var in domain.get("variables", [])]}
                for domain in meta.get("domains", [])]
     return ok({"task_id": task_id, "status": task.get("status"), "stage": task.get("stage"),
+               **product_identity(task),
                "progress": task.get("progress"), "domains": domains,
                "quality_status": (meta.get("quality") or {}).get("status"),
                "catalog_status": ((task.get("result") or {}).get("catalog_publication") or {}).get("status"),
@@ -732,7 +1092,28 @@ def display(request: Request, task_id: str | None = None) -> dict[str, Any]:
         return ok(None, message="暂无成功的 WRF 任务")
     if task["status"] not in {"succeeded", "partial_success"} or not task.get("result"):
         raise HTTPException(status_code=409, detail={"message": "指定 WRF 任务尚未完成", "status": task["status"]})
-    return ok(task["result"])
+    try:
+        return ok(corrected_display(task, settings))
+    except ProductSnapshotError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/wrf/tasks/{task_id}/assets")
+def task_frame(task_id: str, request: Request, path: str = Query(min_length=1, max_length=2048),
+               attempt_no: int = Query(ge=1),
+               product_version: str = Query(pattern=r"^[0-9a-f]{64}$")):
+    task = get_visible_task(task_id, request)
+    try:
+        current = corrected_display(task, settings)
+        content = read_frame(task, current, settings.output_dir, path, attempt_no, product_version,
+                             lambda identity: get_visible_task(identity, request), settings=settings)
+    except ProductSnapshotError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError:
+        raise HTTPException(status_code=404, detail="产品不存在或不可访问") from None
+    return Response(content, media_type="image/webp", headers={
+        "Cache-Control": "private, no-store", "ETag": '"' + product_version + '"',
+    })
 
 
 if __name__ == "__main__":

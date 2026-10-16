@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,9 +43,9 @@ def _runtime():
     return Dataset, Image
 
 
-def _time_label(dataset: Any, source: Path) -> str:
+def _time_label(dataset: Any, source: Path, index: int = 0) -> str:
     if "Times" in dataset.variables:
-        raw = dataset.variables["Times"][0]
+        raw = dataset.variables["Times"][index]
         try:
             return b"".join(raw).decode("ascii", errors="ignore").replace("_", "T") + "Z"
         except TypeError:
@@ -66,13 +68,13 @@ def _lat_lon(dataset: Any) -> tuple[np.ndarray, np.ndarray]:
     return lat, lon
 
 
-def _surface(dataset: Any, name: str) -> np.ndarray:
+def _surface(dataset: Any, name: str, index: int = 0) -> np.ndarray:
     variable = dataset.variables[name]
     value = np.asarray(variable[:], dtype=float)
     if value.ndim == 4:
-        value = value[0, 0]
+        value = value[index, 0]
     elif value.ndim == 3:
-        value = value[0]
+        value = value[index]
     if value.ndim != 2:
         raise ValueError(f"变量 {name} 不是二维地面场")
     return value
@@ -117,15 +119,16 @@ def _footprint(lat: np.ndarray, lon: np.ndarray) -> dict[str, Any]:
 def _reproject_rgba(rgba: np.ndarray, lat: np.ndarray, lon: np.ndarray,
                     dataset: Any) -> tuple[np.ndarray, list[float], float]:
     """Map cell-centred WRF Lambert grid to a north-up Web Mercator raster."""
-    if int(getattr(dataset, "MAP_PROJ", 0)) != 1:
-        raise ValueError("当前普通 WRF 产品缺少受支持的 Lambert 投影元数据")
+    projection = int(getattr(dataset, "MAP_PROJ", 0))
+    if projection not in {1, 2, 3}:
+        raise ValueError("当前普通 WRF 产品缺少受支持的 Lambert/Polar/Mercator 投影元数据")
     truelat1 = float(getattr(dataset, "TRUELAT1"))
     truelat2 = float(getattr(dataset, "TRUELAT2", truelat1))
     stand_lon = float(getattr(dataset, "STAND_LON"))
-    src_crs = CRS.from_proj4(
-        f"+proj=lcc +lat_1={truelat1} +lat_2={truelat2} "
-        f"+lat_0={truelat1} +lon_0={stand_lon} +R=6370000 +units=m +no_defs"
-    )
+    projection_definition = {1: f"+proj=lcc +lat_1={truelat1} +lat_2={truelat2} +lat_0={truelat1}",
+        2: f"+proj=stere +lat_0={90 if truelat1 >= 0 else -90} +lat_ts={truelat1}",
+        3: f"+proj=merc +lat_ts={truelat1}"}[projection]
+    src_crs = CRS.from_proj4(f"{projection_definition} +lon_0={stand_lon} +R=6370000 +units=m +no_defs")
     forward = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
     x00, y00 = forward.transform(float(lon[0, 0]), float(lat[0, 0]))
     x_end, _ = forward.transform(float(lon[0, -1]), float(lat[0, -1]))
@@ -212,7 +215,10 @@ def _output_time_tolerance_seconds(
         domains[0].get("dx") if domains else 0
     )
     try:
-        # 与 wrf.sh 的固定时间步算法一致：5 × 外层水平分辨率（km）。
+        # The outer-domain step bounds output-time alignment tolerance.
+        configured = task_request.get("time_step_seconds") or (task_request.get("namelist") or {}).get("input",{}).get("domains",{}).get("time_step")
+        if type(configured) is int and configured > 0:
+            return configured
         return max(1, 5 * max(1, int(float(dx) / 1000)))
     except (TypeError, ValueError):
         return 1
@@ -284,10 +290,12 @@ def render_run(
     *,
     allow_partial: bool = False,
     excluded_outputs: list[dict[str, Any]] | None = None,
+    asset_prefix: str | None = None,
 ) -> dict[str, Any]:
     Dataset, Image = _runtime()
     output_dir.mkdir(parents=True, exist_ok=True)
     domain_map: dict[str, dict[str, Any]] = {}
+    domain_config = {d["id"]:d for d in task_request.get("domains") or []}
     validation = validate_wrfout_files(raw_dir)
     invalid = list(excluded_outputs or []) + list(validation["invalid"])
     if invalid and not allow_partial:
@@ -304,75 +312,82 @@ def render_run(
             for name in DISPLAY_VARIABLES:
                 if name not in dataset.variables:
                     continue
-                low, high = _range(_surface(dataset, name))
-                previous = display_ranges.get((domain, name))
-                display_ranges[(domain, name)] = (
-                    min(low, previous[0]) if previous else low,
-                    max(high, previous[1]) if previous else high,
-                )
+                for frame_index in range(len(dataset.variables["Times"]) if "Times" in dataset.variables else 1):
+                    low, high = _range(_surface(dataset, name, frame_index))
+                    previous = display_ranges.get((domain, name))
+                    display_ranges[(domain, name)] = (
+                        min(low, previous[0]) if previous else low,
+                        max(high, previous[1]) if previous else high,
+                    )
     for source in sources:
         with Dataset(str(source)) as dataset:
             domain = _domain(source, dataset)
-            time_label = _time_label(dataset, source)
-            lat, lon = _lat_lon(dataset)
-            extent = [float(np.nanmin(lon)), float(np.nanmin(lat)), float(np.nanmax(lon)), float(np.nanmax(lat))]
-            domain_item = domain_map.setdefault(
-                domain,
-                {
-                    "id": domain,
-                    "dx": float(getattr(dataset, "DX", 0.0) or 0.0),
-                    "dy": float(getattr(dataset, "DY", 0.0) or 0.0),
-                    "grid": [int(lon.shape[1]), int(lat.shape[0])],
-                    "extent": extent,
-                    "footprint": _footprint(lat, lon),
-                    "geolocation": {"status": "reprojected", "source": "XLAT/XLONG + WRF Lambert metadata", "target_crs": "EPSG:3857"},
-                    "times": [],
-                    "variables": {},
-                },
-            )
-            if time_label and time_label not in domain_item["times"]:
-                domain_item["times"].append(time_label)
-            for name, definition in DISPLAY_VARIABLES.items():
-                if name not in dataset.variables:
-                    continue
-                value = _surface(dataset, name)
-                stable_low, stable_high = display_ranges[(domain, name)]
-                rgba, low, high = _rgba(value, definition["palette"], stable_low, stable_high)
-                rgba, image_extent, control_error = _reproject_rgba(rgba, lat, lon, dataset)
-                domain_item["geolocation"]["max_control_error_m"] = max(
-                    float(domain_item["geolocation"].get("max_control_error_m") or 0), control_error,
-                )
-                domain_item["extent"] = image_extent
-                stamp = re.sub(r"[^0-9]", "", time_label)[:14] or source.name[-19:].replace(":", "").replace("_", "")
-                relative = Path("runs") / task_id / "rendered" / domain / name / f"{stamp}.webp"
-                target = output_dir.parents[1] / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(rgba).save(target, "WEBP", quality=88, method=6)
-                variable = dataset.variables[name]
-                item = domain_item["variables"].setdefault(
-                    name,
+            for frame_index in range(len(dataset.variables["Times"]) if "Times" in dataset.variables else 1):
+                time_label = _time_label(dataset, source, frame_index)
+                lat, lon = _lat_lon(dataset)
+                extent = [float(np.nanmin(lon)), float(np.nanmin(lat)), float(np.nanmax(lon)), float(np.nanmax(lat))]
+                domain_item = domain_map.setdefault(
+                    domain,
                     {
-                        "name": name,
-                        "label": definition["label"],
-                        "units": str(getattr(variable, "units", definition["fallback_unit"])),
-                        "description": str(getattr(variable, "description", definition["label"])),
-                        "palette": [list(color) for color in PALETTES[definition["palette"]]],
-                        "display_range": [low, high],
-                        "frames": [],
+                        "id": domain,
+                        "parent_id":domain_config.get(domain,{}).get("parent_id",0 if domain == "d01" else None),
+                        "dx": float(getattr(dataset, "DX", 0.0) or 0.0),
+                        "dy": float(getattr(dataset, "DY", 0.0) or 0.0),
+                        "grid": [int(lon.shape[1]), int(lat.shape[0])],
+                        "extent": extent,
+                        "footprint": _footprint(lat, lon),
+                        "geolocation": {"status": "reprojected", "source": "XLAT/XLONG + WRF projection metadata", "target_crs": "EPSG:3857"},
+                        "times": [],
+                        "variables": {},
                     },
                 )
-                valid = value[np.isfinite(value)]
-                item["frames"].append(
-                    {
-                        "time": time_label,
-                        "url": "/data/WRF/" + relative.as_posix(),
-                        "min": float(np.nanmin(valid)) if valid.size else None,
-                        "max": float(np.nanmax(valid)) if valid.size else None,
-                        "mean": float(np.nanmean(valid)) if valid.size else None,
-                        "display_min": low,
-                        "display_max": high,
-                    }
-                )
+                if time_label and time_label not in domain_item["times"]:
+                    domain_item["times"].append(time_label)
+                for name, definition in DISPLAY_VARIABLES.items():
+                    if name not in dataset.variables:
+                        continue
+                    value = _surface(dataset, name, frame_index)
+                    if task_request.get("recovery_policy") == "confirm" and not np.isfinite(value).all():
+                        invalid.append({"name": source.name, "reason": f"non_finite_values:{name}"})
+                        continue
+                    stable_low, stable_high = display_ranges[(domain, name)]
+                    rgba, low, high = _rgba(value, definition["palette"], stable_low, stable_high)
+                    rgba, image_extent, control_error = _reproject_rgba(rgba, lat, lon, dataset)
+                    domain_item["geolocation"]["max_control_error_m"] = max(
+                        float(domain_item["geolocation"].get("max_control_error_m") or 0), control_error,
+                    )
+                    domain_item["extent"] = image_extent
+                    stamp = re.sub(r"[^0-9]", "", time_label)[:14] or source.name[-19:].replace(":", "").replace("_", "")
+                    relative = Path("runs") / task_id / "rendered" / domain / name / f"{stamp}.webp"
+                    target = output_dir / "rendered" / domain / name / f"{stamp}.webp"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    Image.fromarray(rgba).save(target, "WEBP", quality=88, method=6)
+                    variable = dataset.variables[name]
+                    item = domain_item["variables"].setdefault(
+                        name,
+                        {
+                            "name": name,
+                            "label": definition["label"],
+                            "units": str(getattr(variable, "units", definition["fallback_unit"])),
+                            "description": str(getattr(variable, "description", definition["label"])),
+                            "palette": [list(color) for color in PALETTES[definition["palette"]]],
+                            "display_range": [low, high],
+                            "frames": [],
+                        },
+                    )
+                    valid = value[np.isfinite(value)]
+                    item["frames"].append(
+                        {
+                            "time": time_label,
+                            "url": (asset_prefix.rstrip("/") + f"/rendered/{domain}/{name}/{stamp}.webp") if asset_prefix else "/data/WRF/" + relative.as_posix(),
+                            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                            "min": float(np.nanmin(valid)) if valid.size else None,
+                            "max": float(np.nanmax(valid)) if valid.size else None,
+                            "mean": float(np.nanmean(valid)) if valid.size else None,
+                            "display_min": low,
+                            "display_max": high,
+                        }
+                    )
     domains = []
     for domain in sorted(domain_map):
         item = domain_map[domain]
@@ -383,19 +398,32 @@ def render_run(
         domains.append(item)
     start = datetime.fromisoformat(str(task_request["start_time"]).replace("Z", "+00:00"))
     end = datetime.fromisoformat(str(task_request["end_time"]).replace("Z", "+00:00"))
-    expected_times: list[str] = []
-    cursor = start
-    while cursor <= end:
-        expected_times.append(cursor.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
-        cursor += timedelta(minutes=int(task_request.get("history_interval_minutes") or 60))
+    from namelist_config import output_settings
+    from schemas import configured_spinup_hours
+    expected_by_domain = {}
+    model_start = start - timedelta(hours=configured_spinup_hours(task_request))
+    for index, config_domain in enumerate(task_request.get("domains") or []):
+        seconds, begin, end_offset = output_settings(task_request, index)
+        if seconds <= 0:
+            raise ValueError("输出间隔必须大于0")
+        cursor = model_start + timedelta(seconds=begin)
+        if cursor < start:
+            cursor += timedelta(seconds=seconds * math.ceil((start-cursor).total_seconds()/seconds))
+        expected = []
+        while cursor <= min(end, model_start + timedelta(seconds=end_offset)):
+            expected.append(cursor.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
+            cursor += timedelta(seconds=seconds)
+        expected_by_domain[config_domain["id"]] = expected
     time_tolerance_seconds = _output_time_tolerance_seconds(task_request, domains)
-    time_adjustments = _align_output_times(domains, expected_times, time_tolerance_seconds)
-    missing_by_domain: dict[str, list[str]] = {}
+    time_adjustments = []
     for domain in domains:
-        available = set(domain["times"])
-        missing = [value for value in expected_times if value not in available]
+        time_adjustments.extend(_align_output_times([domain], expected_by_domain.get(domain["id"], []), time_tolerance_seconds))
+    missing_by_domain = {}
+    for domain_id, expected in expected_by_domain.items():
+        present = next((d for d in domains if d["id"] == domain_id), None)
+        missing = [value for value in expected if not present or value not in present["times"]]
         if missing:
-            missing_by_domain[domain["id"]] = missing
+            missing_by_domain[domain_id] = missing
     excluded = []
     seen_excluded: set[str] = set()
     for item in invalid:
@@ -412,16 +440,27 @@ def render_run(
                 "reason": str(item.get("reason") or "invalid_output"),
             }
         )
-    partial = bool(excluded or missing_by_domain)
+    missing_variables = {}
+    if task_request.get("recovery_policy") == "confirm":
+        for domain in domains:
+            for name in ("T2", "U10", "V10", "PSFC"):
+                variable = next((v for v in domain["variables"] if v["name"] == name), None)
+                times = {frame["time"] for frame in variable["frames"]} if variable else set()
+                missing = [value for value in expected_by_domain.get(domain["id"], []) if value not in times]
+                if missing:
+                    missing_variables[f"{domain['id']}.{name}"] = missing
+    partial = bool(excluded or missing_by_domain or missing_variables)
     warnings = (
         (["部分 wrfout 无法读取，已从可视化中排除"] if excluded else [])
         + (["部分产品时次缺失"] if missing_by_domain else [])
+        + (["关键变量或变量时次缺失"] if missing_variables else [])
     )
     if time_adjustments:
         warnings.append(f"{len(time_adjustments)} 个输出时次已在容差内对齐至计划时次")
+    default_domain = next((d for d in domains if d["id"] == "d01"),domains[0])
     default_variables = [
         str(item.get("name") or "")
-        for item in (domains[-1].get("variables") or [])
+        for item in (default_domain.get("variables") or [])
         if item.get("name")
     ] if domains else []
     default_variable = "T2" if "T2" in default_variables else (default_variables[0] if default_variables else "")
@@ -436,8 +475,9 @@ def render_run(
         "start_time": task_request["start_time"],
         "end_time": task_request["end_time"],
         "history_interval_minutes": int(task_request.get("history_interval_minutes") or 60),
+        "output_intervals_seconds": {d["id"]: output_settings(task_request, i)[0] for i, d in enumerate(task_request.get("domains") or [])},
         "center": task_request["center"],
-        "default_domain": domains[-1]["id"],
+        "default_domain": default_domain["id"],
         "default_variable": default_variable,
         "domains": domains,
         "quality": {
@@ -446,6 +486,7 @@ def render_run(
             "excluded_frames": excluded,
             "unreadable_frames": excluded,
             "missing_times": missing_by_domain,
+            "missing_variables": missing_variables,
             "time_tolerance_seconds": time_tolerance_seconds,
             "time_adjustments": time_adjustments,
             "geolocation": "reprojected",

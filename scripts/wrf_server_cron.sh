@@ -37,9 +37,11 @@ export GEOG_DATA_PATH="${GEOG_DATA_PATH:-/home/tx-lab/WRFwork/DATA/WPS_GEOG/WPS_
 export WRF_RUNTIME_ENV="${WRF_RUNTIME_ENV:-/home/tx-lab/WRFwork/env_wrf_nvhpc.sh}"
 export WRF_EC_GRIB_FILTER="${WRF_EC_GRIB_FILTER:-${service_dir}/ecmwf_to_wps.filter}"
 
-inner_cron="${WRF_INNER_CRON_SCRIPT:-${service_dir}/wrf_server_cron.sh}"
-if [[ ! -x "$inner_cron" ]]; then
-    echo "WRF_CRON_INNER_ENTRY_UNAVAILABLE|path=${inner_cron}" >&2
+download_script="${service_dir}/download_gfs_00z.sh"
+if [[ ! -r "$download_script" ]]; then
+    echo "WRF_PREFETCH_ENTRY_UNAVAILABLE|path=${download_script}" >&2
     exit 4
 fi
-exec "$inner_cron" gfs
+# Cron may enqueue forcing only. Task discovery and WPS/WRF/CFD launches belong
+# exclusively to backend_wrf; never chain to the historical directory worker.
+exec bash "$download_script" "$(date -u +%Y%m%d)00" 72 "" prefetch

@@ -1,0 +1,2340 @@
+{
+  "baseline": "1ee4c7b",
+  "scope": "ordinary WRF only; legacy runtime paths and retired downscale are not restored",
+  "definitions": [
+    {
+      "file": "main.py",
+      "symbol": "namelist_runtime",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "allow_wrf_asset",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "1c1663f7e88d898fab96ebd11926bf08223479cd81d7defef320b55c1be24bd8"
+    },
+    {
+      "file": "main.py",
+      "symbol": "downscale_asset_owner",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "lifespan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "628a72612047ffe9524adadf2578ddb83e9748b1e3d66a7eb5a4dc25a9507789"
+    },
+    {
+      "file": "main.py",
+      "symbol": "ok",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "467f232c12d17dd61cbae51648b5341f7819dd61e1a5a70ec91c02a3ef98decd"
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_task",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1d1a2998429fa700b047f1749cf9996802ad38fc534eb9d4146f7ffe15af25cb"
+    },
+    {
+      "file": "main.py",
+      "symbol": "_viewer",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "56db1d1fc7c6b70110f6c9ec50f1e59e3d09dcd20c74cefacc089d892bb8818d"
+    },
+    {
+      "file": "main.py",
+      "symbol": "_normal_visible_tasks",
+      "origin": "compatibility",
+      "reason": "owner_and_archive_metadata_filter_on_legacy_list",
+      "baseline_sha256": "f268c6efdfd6927eea54ec366b522017e64e268bae3bfb9e120b121e0ec53fc1"
+    },
+    {
+      "file": "main.py",
+      "symbol": "retired_features",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "runtime_readiness",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_visible_task",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "3baf8d9fe195e93c1fb63bc7b954ae5c37c72dea3769790a5a1b54f42dca3ef3"
+    },
+    {
+      "file": "main.py",
+      "symbol": "root",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "5aa594a647ba69c0ac2e819c2486eb52059e59b1178ef00916df48cf0a66a74b"
+    },
+    {
+      "file": "main.py",
+      "symbol": "local_activity",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "health",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "58deffc0eb228149f6458755c7a86732c3189f3a609e844036aefd0754260cda"
+    },
+    {
+      "file": "main.py",
+      "symbol": "options",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "6cb1989cfd9c8b0222870e60f3f12c53941824e3a5705eaf28a9d3ea9d915483"
+    },
+    {
+      "file": "main.py",
+      "symbol": "data_status",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "09b738e89c9b622d662bfbcd82c3d246352b79580f53cb80abae9e3c44ced585"
+    },
+    {
+      "file": "main.py",
+      "symbol": "planning_assess",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "d0bf1c64ba03a07e818eab67a10af969fccf22781e8cf8e76b22d8ecad20cb64"
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_namelist_catalog",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "namelist_resolve",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "domains_preview",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d1a358badc8ddc4b508f87e8ee3937e4a4845d6485ad602ebe2ac32170680f79"
+    },
+    {
+      "file": "main.py",
+      "symbol": "prepare_all_forcing",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "c242d0a03d962121d30b1a24ec3841f903a82b4218fd930167c85cf23485dcdf"
+    },
+    {
+      "file": "main.py",
+      "symbol": "sync_latest_remote_forcing",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "fb18067d1cf7d44d38bfe18a6152b42b01427edce986b65cdd2d8c74daa4c0c1"
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_forcing_policy",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "patch_forcing_policy",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "submit_forcing_download",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_forcing_download",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "list_forcing_downloads",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "cancel_forcing_download",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "forcing_cleanup_preview",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "create_forcing_cleanup_plan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_forcing_cleanup_plan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "execute_forcing_cleanup_plan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "cleanup_remote_forcing",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "ff0b3b3adff9c3ca835b26d9078d5c519771d4da9e277bb0e2695703b4cdd377"
+    },
+    {
+      "file": "main.py",
+      "symbol": "trigger_remote_forcing",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d798f9dd4f47398d54692f448957e512eb0a84e29882fab9201d7bf96ba17119"
+    },
+    {
+      "file": "main.py",
+      "symbol": "sync_latest_remote_gfs",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "b809db0acc26429c4a10fbf465ec643bebd0045fc69d63399ef472be70a22b03"
+    },
+    {
+      "file": "main.py",
+      "symbol": "cleanup_remote_gfs",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "f9d32b2af56b32f8f692b2c814fcc779ca172aeba5c40ff227ea7f5e22c7acb5"
+    },
+    {
+      "file": "main.py",
+      "symbol": "trigger_remote_gfs",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "3edd4a800d449ee13ea212f1a3a6090c25e0003b44bef0ee6e3a223233fedf09"
+    },
+    {
+      "file": "main.py",
+      "symbol": "validate_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "a82253b88cc1a19b16a91ac1031001c6d8b9ea577359bb7f556386c3773ff949"
+    },
+    {
+      "file": "main.py",
+      "symbol": "create_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "3d13874048051e28dfe519341ba06a8cc659639ed18578c515b0b2e379c9e775"
+    },
+    {
+      "file": "main.py",
+      "symbol": "authenticate_hpc",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "6cadcd733a729de1800d6efa5a9bf238925bbf67c69346ec9fd57e6009a97978"
+    },
+    {
+      "file": "main.py",
+      "symbol": "list_tasks",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "bd8a1f071d0ead37a25293dabb98cfe46cd062462e0bca31a326b824ae9d837c"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_metadata",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "submission_status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ffbf60f6f6423e27b1d126296c8c1252b34db3fd37c0ff3984ca3dc693fa9a40"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_detail",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "ab09c7540c4781d605f7147affe2741bc8a79e222567775ba047bc51a58932c1"
+    },
+    {
+      "file": "main.py",
+      "symbol": "delete_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "0cc6d97c14a3238c865a4b1e7b0f1f18268508957e2dfaff1cab4175f6934404"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_deletion_plan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_deletion_status",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_deletion_execute",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_deletion_reconcile",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_logs",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e7a9e48879954645d5d15f94cecf23dcfc1053bea57cce621a5bd0479585a097"
+    },
+    {
+      "file": "main.py",
+      "symbol": "cancel_task",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "c07e6b55fa40858b8f1a78453423c75de8e8dad01d2f6cb2a8cc711fb81c8f94"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_events",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_diagnosis",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_recovery_plan",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_recovery_detail",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_recovery_execute",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "get_legacy_recovery_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "main.py",
+      "symbol": "retry_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "bbda06e54623970f25f9d501156b2687bda899f9dd1c60543f88525e4013ef71"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_restart_plan",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "967e93ee958ddeb7dc09216e95c203e8c54279904a48eec150905ccccea4f03d"
+    },
+    {
+      "file": "main.py",
+      "symbol": "restart_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "73dce6b269e8db89ab5f48d6438b91fb6de72d368fc5643fcee8da14b23a0e82"
+    },
+    {
+      "file": "main.py",
+      "symbol": "resume_task",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "45519c43896be56e1b6f95f704b5caf5578a0586e14526c36d260d36bda22f1e"
+    },
+    {
+      "file": "main.py",
+      "symbol": "retry_task_outputs",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "34f1613cd25076b40be1688ea2b56a19f676aa9ee393ab7df3ede9a0169f3c00"
+    },
+    {
+      "file": "main.py",
+      "symbol": "render_partial_outputs",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "c0edc03d75fa31393dcaa64d4226dd19811c82646867ca0a23f1715577de1d6d"
+    },
+    {
+      "file": "main.py",
+      "symbol": "retry_catalog_publish",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a0af5ddd3aa3ef742251534c526349ddf3ba95aa06f031e7bfbd5975b0916e85"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_result",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "1c4646e40e1a31b10c116d5c294daf412fd93324471b6883b91340cb9fc35e20"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_summary",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "2b75e8a3418806b8f39346bf3990bfb08f00ccb69956c9703151704190952b9f"
+    },
+    {
+      "file": "main.py",
+      "symbol": "display",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": "3b80233dc29e591f80c64b62a311629be1345b6cc7bded6bb7036991d4f22520"
+    },
+    {
+      "file": "main.py",
+      "symbol": "task_frame",
+      "origin": "compatibility",
+      "reason": "configuration_agent_api_authorization_or_safe_management_compatibility",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "resolve_spinup_hours",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_immutable_release",
+      "baseline_sha256": "deeebc1ffff59f7f0105431e79b0c06ad299a5d839d7154a9db63e0c7c37d7fe"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "observed_model_progress",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "RemoteTaskFailure.__init__",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "93317764bf7e7efcfa0dea8cf537d00f23c32b295497d32c019bcac3eae9678b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "serialized_task_operation",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.__init__",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "4d418977c43e0fe574cb9f6d3965a122aa76ad50bc4a5f4becd269e8b5600d1c"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._operation_lock",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._require_recovery_idle",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.queue_size",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d3efcec896ef3bc6c69650c800a0fd4f843655528f9c3ed91337910ba5f5101e"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.active_task_id",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9d23b03dfceb21b9d18ae4b57143c27e13a78be95ca15c6c4896451689d0af26"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.active_task_ids",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "648d0eb780a113adbbcb2f5386ecb8f4525dd8fe33df065094d8b874debaa58c"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.active_task_count",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "23eafafb4c473e10806cc7d3457fb912916566bb44acae54d8548ac726455871"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.hpc_health",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "b447194487901192b9c9c3d4de0d0c60a60ac55e9178c892690d63786d647111"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.gfs_prefetch_status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "c6960001cc582b654c140df515991e064a93927b282982afda01d3c791dd6217"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._set_gfs_prefetch_status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "7126068b0835d9fdfee3eebfb16fdbea58380bc3aae205005d6581f1926221d9"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.set_forcing_policy",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.refresh_hpc_health",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "75a75ba1497faf103bff8c49c3d8226d8c1e2b8f1fd66f21503e7191508948ab"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.authenticate_hpc",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "58387f62046cdefc9777659b7f208bab29690b68d0f61ed3b7d84017ed6ae48b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._check_health",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "02ccca6db5fb069d4fc686f9a7d45d802ea301955973180088945e8dc34b29de"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._resume_paused_tasks",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "3f9b35bb6d305cd2879ef3407948ec4fe21b430632d1312f4a615f20a605f265"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.sync_latest_gfs",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": "67bc54968b99beb1ca6df070ecf610a266a21b00aeb44fae217484b2dc447bcb"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.sync_latest_ecmwf",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": "80a83521fdcfe3484b78df315807bb04c93d9f6b0fa8a4820eca54a75e72999d"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._prefetch_latest_gfs_once",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": "67fc701d34bcef6c0153ba1ce79ab7fd8721ebfadfb44af1cb37748d5aa630be"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._gfs_prefetch_loop",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": "cd425d95b25d92c7c49dd0a7f6b0754ed03c520047fbf7e0635eb31ba693b0f3"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._reconcile_forcing_downloads",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.start",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "7fa8afc7de394a73d691dc09861853df9ec3257cd992e02b0d1a4dd5e9ec2151"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.stop",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "3d90357c8f393096278c75f77ba1cd79e609b81fda9a980734bff1769cedde9c"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._dispatch",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "fd16513d28d72f1ef84892b0464ddf14ed7a748a0d4f0461b72d41468766f697"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._dispatch_pending",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.new_task_id",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "53a4d7e606c2fa53492921c199e02b38dde31a0af1dd6a0471c6a206fc732144"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.submit",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "955c0aa7094aca69a9b14db5a6955046b4d69f8ac807e54d4a1cfde6d3208c8b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.submit_idempotent",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "997d71f6e4c1710208626b8465d04a7d7f19f4139b1a8c6e2dc5002d12e0fa09"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._decorate_legacy_failure",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "6a080c6164262c2630a3dc9d090414a47083cca10d8d3e0216cb6f8251411573"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._attempt_summaries",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "4d0228bdd628d3fc7f3243cd0e55197dd2752042b0bf2448ada9df653411a58a"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.get",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ca7d297595ca5e587345b4f35d0e64c3de47c2c92550aad6b1c905e4f7a7a1c2"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.list",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "665c12b5d3c12dd034463c7da751c92a42ae9bbfbd4c37352951856aa0bd3913"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._forcing_cycle",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f1062d8f54907d14df848ee5535e432d027fb2a08a2c8b4edd4901a75d42c89e"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.task_forcing_reference_counts",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.active_forcing_cycles",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": "98a6eff110f61471add3d0d216df12dd48b365e6f167858613ef07c8b2ad4b69"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.active_gfs_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9f4635e404331f9721187845f25c9a9a7b6a3fe8d05473aa7aa76eb9a40912ee"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.cleanup_forcing",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._forcing_wait_deadline",
+      "origin": "compatibility",
+      "reason": "forcing_reference_policy_and_single_scheduler",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.retained_gfs_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "6d4e0211a9c8490bf61fb25eb5e5b7eccda922fb3a027a19732cd24ebb9ee22a"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.protected_gfs_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "081605199dab4956ea855e52e9ce7587f6364bdb47a903bf305ac073b611c488"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._select_pool_cycle",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_immutable_release",
+      "baseline_sha256": "6357681f76f8873ca1f412fc37399addd160a3a4451e4cec73ff694f9042e6f7"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.retry",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "33a9498be3476a36281543f72265d1adb1b95c05cde12914ec7dd27bf32ca3f1"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._restart_local_paths",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "4717302c7440c4126d85325ca8fa3bd74467c34384fe5208612be620a32c3015"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.operations",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.require_operation",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.restart_plan",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "884abf58e476ec45ac9f1d4d2e13d6a198f2c557639700d2ccaf7c7b43561e01"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._archive_attempt_files",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "0cd7c03eaf71f575bda15ba00d9305003697b9c093c81a0a0ad214c4f9369143"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.restart",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "18627f0db7bac556c96cab55e63d6fe0b231c77db7a996b1aee20670c9e359b0"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.resume_external",
+      "origin": "baseline_with_guard",
+      "reason": "operation_lock_deletion_fence_and_native_ask_policy",
+      "baseline_sha256": "6a826ba3bc46bb9bc197a5b56e1f9ac83245dd7c2ab1aeb92f0537b98b68f21b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.retry_outputs",
+      "origin": "baseline_with_guard",
+      "reason": "operation_lock_deletion_fence_and_native_ask_policy",
+      "baseline_sha256": "9de4c0f379da11a5b53458dc05eb6844ab699442238c52d7bbccfb9b7c3feff7"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.render_partial",
+      "origin": "baseline_with_guard",
+      "reason": "operation_lock_deletion_fence_and_native_ask_policy",
+      "baseline_sha256": "7f2de5122386b0549918ff024880c80fe8f7b407e11807e43ccc094eec12e871"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.retry_catalog_publish",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "3f8a3705d6dbd21c20f6353d84e51bbc69e47be965bcf42b24ecc4f71fffecc9"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._retry_catalog_publish",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._managed_task_path",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "04923a6795591d34fe819a21beaec9b2d247d140bb8daea2d77f4df92e60927e"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.delete_local",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "2648fbe1fd3c11eccaf0579eeb3adf1355816e514c5a13fbf2b36c6a9f618282"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._log_path",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e7abb8d074f4d9328a4691f402d0a8994f73875b9504f20eb7d5218c2ee938c1"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._log",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "54707b9f2a2957edae01abb15e1f01de06b4791707e7df7b170579828d2e0430"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.diagnostic_evidence",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.logs",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "a5c715600d1d38626c3c1a86a16e7c1589265901645309fbe960dcc0cf82fa69"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._merge_runtime",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "72ab294c87c075fa7cd96f900f1a9aac247d1cc5bcbb320fb81b3d75b1de7545"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._publish_catalog_result",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "ba026afef03a70050744b1aa761ff8a393c43f9fa935a80bfc584a50819875fb"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._is_external_error",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "4245cec81fde13ca03e3ce2472a22fe5467f48d764dbb1260d32977f251b19c1"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._failure_info",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "ec573111361d7d2bb5119fbdb1ec8ed31ad5ef5c2cadacd8c60d118c30034529"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._schedule_reconcile",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "034ab7c639cbc262051c349498219e1a7622e13152b6073dbfa8bf7e8a862ca1"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._defer_external",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "72776a07335eef15558daac0ee784e3240f4e369d7e03b763ed84c1c89402834"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._is_cancelled",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "c084efa3f83f52b7e281e7117a4fa165ca25c6feb15d92ed2d0ef56054b328c8"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._raise_if_cancelled",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "96678331f5c6e871dd382f0224a74763b185cc76e566836fc39fbe82d77f974d"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._cycle_lock",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f152c020b66e3c610ed5f171aa885924282980217cc4dd345f1b55090a847a32"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._prepare_cycle",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f6942d71f352fc0b0905c3ff752a8d50217d35afd654d5af15d5d10bf07c930a"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._record_cancel_observation",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._schedule_cancel_reconcile",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._remote_cancel",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "2786801cee132f6b4ba5683a191198db890f3b6275440b9c630c8a05d97bd865"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._start_remote_cancel",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "977945143131a3c8d009a43859855e05d0815ed6c86876b1e695abd9566ce57e"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager.cancel",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "32f563fe5a7885e558b59901ed36433ad9a807ebabecf5615eee792e7da2e563"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._complete_task_cancellation",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "cad39c1818dacd0b5a94db5bffeb9eec321da3936ad624aeb4c6b547d267eca1"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._run_task",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "e23314f5d47b5f588f3500f1e8c804aa945c7ddfb3e23b467ec96611c1e40651"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._reconcile",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2aed7b0376bc1100dc80445b744d53641b9738be0aef54570d3abde7c56d5a10"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._monitor",
+      "origin": "compatibility",
+      "reason": "managed_process_identity_persistent_queue_and_operation_concurrency",
+      "baseline_sha256": "5d16324a36fbb697a2d27077d0590faa2539228da010d5fd3f58548168697c4b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._persist_observed_progress",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._merge_remote_profile",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "7e7211da435330a78925f6670345836192a480cbddd585a5fbfe155507788935"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._finalize",
+      "origin": "compatibility",
+      "reason": "attempt_assets_product_integrity_and_agent_evidence",
+      "baseline_sha256": "17f8752cc35c46769866076f5a32b8610dcc6cae6b3187ce01c614e10b88225b"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._pin_runtime_release",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_immutable_release",
+      "baseline_sha256": null
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "WrfTaskManager._execute",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_immutable_release",
+      "baseline_sha256": "68811b11129afad15d00d64f0fd350a22de42070e383c535e0f715cd9577c87a"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_sha256",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "3fa1c22b94a5928c4756592f1f91adad166062525e446d644195ea255f117549"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.__init__",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e415dd8d6c73717ac93f1d9762fdb65b4806ecb9e2e213867ee507d311e91a64"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.target",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2025aa184e1d6ba6b660e488c5a1480422bd7e980d4900d88b30f2ccfab19d77"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._uses_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8ebba133c78ebdaf1a84169806efb5e5484e296b49934ed56ab6aa7c39483275"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "47dfa182cbb9402dfc04f4f782c43b5db100f47cb7b5c7de63fe8d0cae289d3d"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._ssh_base",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "60ff79add37182aba50e0ea83e96787c2fa570c4980b2f9c460d9b75fd8a29f5"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._scp_base",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f0b565799eac0195f7d8988e802072c7e6b97ca90d55368e96e855df2cdc7d0d"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._run_with_system_expect",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "630d0876b950e900ac04babbdcb11891e43ba1509c19b17a4482c51c55c0a438"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._run_ssh_with_system_expect",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "953e4d368feae20f73011478177035bf5ad6bf020a873243a2242d9259187f77"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._run_ssh_with_pexpect",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "18666f927d790b19b84da7bc1b498c75abe5db88b9ac88a17fabab4f65c05f58"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._run_process",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1106745c2c8c3b5cd9e32b7d8a1e71ee5b7fb8623e362053603ea83db84223c6"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.authenticate_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1ebad65127bdf6de78fa5fc4a6f503f3ea9f7e18c618d1b81b493f7c31810be1"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.clear_session_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ec58191515ec30f8b73d9e57f9d66093fe5ae1edb24d918f5f1689287ea5b284"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.run",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f7d91dab02e938a46c2f1355395f742114343d569289f57a833b1bc2718c7a7c"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.upload",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "342f46044176993106e5943278a393545b2a487f3956df0388c9a0e64ef8d408"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.download_glob",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "669628703954929a6cce9b80b366f488e560930dbd226c1eb79e5052e0e341fc"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.health",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "cbd905464373eaa964a952786f75cbfe3cae711a39e277b13d77ee07b90c19ae"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient._assert_task_id",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0bf4f9660e8a281dc4d195bbb7e02fe292f94924edfe5a6d6596661dc67c830c"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.service_dir",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "985263b671aac539313f2bf38a3b29326a6ed6ebee6fc6f7e73138f78531fbe9"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.task_dir",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "703b58e07ec910115af92c0c6c9187280a8e1f60fe3ddad12e34cae9a4aab3ff"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.remote_output_dir",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "5ce4b714845225cfc84126d9bd09e9213a25f501117003aa5a5957efce3f52f8"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.prepare_runtime",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "642f59af77448711a7598214b70130bff2e04563a844b3d63f7f72115446e94c"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.launch",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "fb96aa249e39cf32cf0ce35c20ed430909f18670b90be17fac56f8283c948a69"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e83a4590d001ad087bd2ee6ed2df37b47bc79110d94f448f1000282ac079cb80"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.download_outputs",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "09c194855a9af53b3ffc15b2397c0bbc1533e9583dbb087e469f937c4bdabd53"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_LegacyHpcClient.cancel",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "205a78a31e143fcb4ed35af691c1ff997db83af808e0bf427c8091d3753dfe8c"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "build_task_config",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": "1d4cb7a7e41362b4c9178c1fe4deafd3ac9a58af9b58b2976c0564a27f543990"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "write_task_config",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "b1ebe0edb1d7fa6fcc0ce2f59e39e8c0c2ddcaace96de805d60f8ef1322e1efb"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_runtime_environment",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": "f23507774592c3fed57b2f0801db58cd88fbbfd9f0404626b24decde0a625677"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_write_runtime_environment",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "14822d0cb8ceff16994bab2c3ab1805dab23fe78da63b52bfc968270d64e086c"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "_write_expected_forcing_index",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "6c48f822820090405ed0e2e097163efa0e4de2339bb5a3727f54154c34c84e84"
+    },
+    {
+      "file": "hpc.py",
+      "symbol": "write_task_bundle",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1c7a3cf002cff95ed90b4ea1985567c7c34809e5f3d5eac918a0502025a46cca"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "_sha256",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "3fa1c22b94a5928c4756592f1f91adad166062525e446d644195ea255f117549"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "_utc_now",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8808713e258af382bbbe82d12b214bd5fc7289856f810c2c81fcd05e3b6a882c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "_safe_local_output_name",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e69c2a4ab2ff9ca2f478d9618933316962b89767a3c354719583cce4f26c5bec"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.__init__",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "e0be9a57c931a6f7d45ca10ded9a7ff632a3b18c9f40488c4b7fee2d2d2e25c2"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.target",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "50b7b3ca404d72b26e379566f0192aefc3588049fafeb89ea5bf462f56a5b06e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.gfs_bounds",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "473e5d1939ca805b5b2dd20df782f370bb586061eabf8c97aef17ec84d456401"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._pexpect",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "eaabe4a8c496860a8c2fcfe4d1e3db0960ba60b74c2b9e7905a1887ce007d3cd"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._uses_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8ebba133c78ebdaf1a84169806efb5e5484e296b49934ed56ab6aa7c39483275"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "bbd9866ca0a355026650be147fcab3d3595600502eb57dfc5c9dcf045ec0b61c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._uses_session_transport",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0f12cf4aaf88b1a79d63edddb96d9d8784f969ddcac9a1dab0675a20746bac6e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._ssh_base",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a89af9c663d5d68a22f70fdcc720f9b7fe73c500caa473ddc209469a853b275a"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._scp_base",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d3ef0505bea286be49115aa1c51e44b3a5de647c810cd446aebd95daee03689f"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._sftp_base",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f2ddffbbc30a5df16cdfb8261aa828ecbd045353ddb42de9df104a7b64b7db21"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.transfer_status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "01b57d2d1f44fb5eb8dec583894fe9b7bb41022677fb1fa8a8eabdc26098b53c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._quote_remote",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0f88fbff3ebccef602051c7c7796e1ec9f2adfdbbe7e2403fb26ad20d31adc8b"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._split_marker",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d3eb98f9a1c241ce9c1f42cf797d915d24e51e82a35c777f97dfdee3594f6ab0"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._marker_command",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "7c8e08411d000702681464a4e651328c9968f4925858bf0885644d73608da3d4"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._sanitize_terminal_text",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "c964833bed752cb712615dad03f3f1624d5cd65586914e8864a868f574720084"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._set_connection_diagnostic",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "dbf1ed7b8d7d8cfb0556c2d53a9146e89cdc19544082204f8f217958d8073079"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.connection_diagnostic",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9d5055d2f6c1e58ef66924e00d43c2e5d0c456ef1edba7fbcbd2471ad957b962"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._close_session_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2bc8892a864160dd134db57953448f0d5b889a71b8495c11f28ae3b5d3895486"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.close_session",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2eca6c6713395358ea1ede6b710cedb552fb273e761816b65cbc0c2204153b80"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._session_alive_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a55b5b3021a6c98d30051eef2aeab61ef4e5a3265baca3b2934d2059cfa757d0"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._connect_session_once_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2fc59b96c0f2f7c3e6d4d88340c645dab84644db48f5829df8542ab7f5b12574"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._connect_session_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "96e2932146b776bc1472ff1604f99f55d906e6444e9e9b4ba590cd934af44764"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._run_session_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e4f6dae4901b3cf4cff76da8a10cdd2f11797f5e4ad63ee6c325493b94c5af2e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._run_direct",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "20e27fd8a182ca160cc2f7800d5d6a083f88a8001d58c397f4a949a6bb08b148"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.authenticate_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "82f9cd7cd8a5a4bb3ba697831c306f2dc4e464040cc2093d5442a4bd6a2f4b5a"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.clear_session_password",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8fadf7040b5bdd2c0588dd992d1596ccb17284b5deaaf523c781f3a1c882065c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.run",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "c843a2bfbf51fbb3d36186fdc64be35f6c539c14783b95b3d4af60c6812ae435"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._remote_meta",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f062233eb0711c9482bbbfacec934de17adde6d7317ab66dbfb9c6d005ad8239"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._send_all_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0e57f337bf5e5143ee7427d6de9e17ba025241b43afdaa497f890ee752297795"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._upload_bytes_session_locked",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f9241a8a28bc086160998d1e9c4637a8f18ac89973353b072918edbf10d5979e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._sftp_quote",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9ca7a78031f1518e41c45e31f305637f83f0a7088b2763431389c18f72a4c9bd"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._absolute_remote_path",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "f189ed08fc07278bb79f3d09310cef555856ff816523401c5be2ead7393f7792"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._upload_sftp",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d33a15fb8fda22d8e5e77115af4f3c2e54fab15a6f38da1058ea4a676e520f47"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.upload",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "69fe035ee2166568624d41c08c28339864eb021bed965b8564484bd88f653915"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._upload_text_atomic",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "95c5af83d5e50e8bae3b693e681d51869cc8eeb1772fb1fa2d11567dec02aa80"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._download_file_session",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "631f312e2e9025c894743efa737e2d4d04f8f91824fe261fc4f3a8c3f8b16bc6"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._remote_glob_inventory",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "d6ea3eb9d44fe9d4635a919fc273ccb3dd78160d288d63a8c68e01a311037ff5"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.download_glob",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1e83cd5d27237c1117cd942b301fd7cd4a74988d774f2d36b5e26a6d45cf3775"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.health",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "d63e30fa9d3d915f49d9801f5dc3899fcd66004c7b43fbf5b0b7f70d06f81885"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._assert_task_id",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0bf4f9660e8a281dc4d195bbb7e02fe292f94924edfe5a6d6596661dc67c830c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._assert_cycle",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ffd8724d12403979f77d10aeed2604fbfbc0c9ae7e53482a465feb2e72449f05"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._task_runtime",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._release_settings",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.service_dir",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "985263b671aac539313f2bf38a3b29326a6ed6ebee6fc6f7e73138f78531fbe9"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.task_dir",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "703b58e07ec910115af92c0c6c9187280a8e1f60fe3ddad12e34cae9a4aab3ff"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.remote_output_dir",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "5ce4b714845225cfc84126d9bd09e9213a25f501117003aa5a5957efce3f52f8"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.task_artifact_paths",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0d0650f91295fac5589f43b25982ff5ce03e7cf2cc436f9705f0fa161ebbf81c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.prepare_runtime",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "2fb5c48eefc9af19597b748d5d2577faa7ea5f3349dbd5480be63142e20d77dc"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._manifest_entry",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ab3374ca46cee4f818c75a143bc9691910ff13246e2172b2e73289500bccbb50"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.inspect_gfs_files",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0790b762101f3a8754bf63734c6938d704c9ba5a335118f31ef98e9cb128be1e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.trigger_gfs_download",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "21e25ed85bdb9ad826ca3dbca1f2820627a1a6c3845ef3421468995303edbaf4"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.ensure_remote_gfs",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "b06fb52bf85c2aa2fb08e3b7dce2572bb64086e323f336698d237e9be6473765"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._forcing_wait_deadline",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._forcing_wait_remaining",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._normalize_forcing_source",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2077109f7da471717123fc379b344cb143f9b20282c56ad72411bee9e16ec617"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._forcing_settings",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "5f7e6acfdb7760f81e1290077d23afa188b9ad58b34c7e5b79681c620178453c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._pool_queue_state",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "34c12fde88c663de2a3e30a0070cc84e634d9deb4e2f7482974579344487b92f"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._queue_cycle_details",
+      "origin": "compatibility",
+      "reason": "Cancelled request entries must not masquerade as active downloads; preserve all other legacy queue status semantics",
+      "baseline_sha256": "1257687fd238d22063778a0aa2d1773bea9a99adcac1cffb5b611e0571f93fa4"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._failure_class",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "73480053f2540dbea9084f82aa31a9def0c49b801014d199ce7e238bc400ffaf"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._retained_complete_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "36748424668b9d327b7cddf6006a62dde2a4391187877e9d2d682c5aaa423732"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._is_terminal_pool_message",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "b12d651ea7dfc01bc578e1ddfaf12b170e059185964924157af4bdf8a23cf151"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._cleanup_history_command",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "df5ef14ca55045e2e7e446576c23cf941539c153208afc8cd31b16fcdcce92da"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._forget_queue_command",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "cd3e58bae30521ed371004891f7b7fe558225f8021b367ce99271b4079ca5af1"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._prune_cleanup_history",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0767918fb33e70a69795dfd2403788b8929da5687c85067464864898e94e43eb"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._queue_has_terminal_failure",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "70f26237cec20267cef760803293754690fb1b464aaaf0c682731cc6b39facd4"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.complete_forcing_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0d0ef4fd181888d4a7061b30bd53501fb75419f69294c79c9ec2d5cc1951eb3e"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.inspect_forcing_files",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a46523025584f1a1714dbd017e038e3cb04f3daf1a2f6ed217b8d94ed8f7b7ff"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.forcing_download_progress",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.validate_forcing_semantics",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._manifest_entry_forcing",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "1961d5e2d0a5e29055cf5c095690d3ff5ac32bcda8cda40d0731180331110947"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.trigger_forcing_download",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "5e3b55487910e86a75d8765441ebeb5ffa2c29e4fcd16c60b72db6abe811bb10"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.ensure_remote_forcing",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "374d51c70b6f95925b08a71d34c9c5cd684e4391d351d3ff6b557aeb677f13b4"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.gfs_pool_items",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "3ec402196fc498f211ce1331ba8bbee86dc8f6ab8b03f573db2944e936a1b797"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.forcing_pool_items",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "540bed1c4001b89669840f43ba37969578b8af18a3726023429b085e9ade1b1c"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.auto_cleanup_gfs_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a3f551882a6c7f6723befbb4bb66ae953b3ac1afbe497f26c1f485141a14861d"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.auto_cleanup_forcing_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "28f36f41e3919c5949ed1d51d5bc7b48f90d692fa627ce33d68c7ad048d17917"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.release_forcing_reference",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.snapshot_forcing_cycles",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.cleanup_forcing_cycles",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "b0183fc5b91bb4a51da4e8e6f0fa6bde24e3370d5545ce638f3d5d6e23466c5a"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.cleanup_gfs_cycles",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "a208f59e26d5c7b016e307f4491c1b2e003aa808277b9ce3b0f3793cae05e024"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.launch",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "301a4d6e43e974860759f455106ac10148f289050a6663cb9fdcfe39df803878"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient._managed_status",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.terminal_evidence",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.diagnostic_status",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": null
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.status",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "6b1731efdd67bf7fc3f9af5d5e1f6b458021373261cf561fe453ef5e3b101f43"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.cleanup_task_attempt",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "a06956d5fa3b5c2458f2832ac12635c8a7c374cbe6dfaedd4579b2f15eefb516"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.download_outputs",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "2ddfc5dd099573e50ff2bce5d92790146ea3f834245cf924258de6a71a45c135"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.validate_outputs",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "faf82e317b778844ae63f6ad057d05ba95b6dcc2689df3cf70f48fa7aee792af"
+    },
+    {
+      "file": "hpc_transport.py",
+      "symbol": "HpcClient.cancel",
+      "origin": "compatibility",
+      "reason": "isolated_release_paths_managed_process_or_forcing_integrity",
+      "baseline_sha256": "205a78a31e143fcb4ed35af691c1ff997db83af808e0bf427c8091d3753dfe8c"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "boundary_buffer_hours",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": null
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "_check_buffer",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": null
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.__init__",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "57586fadb355cd31b8351d6f8b705e45b4bea14b509d9d06bfa30d3a55162951"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.cycle_key",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a87b450a2c6e988aa8aac579fe173c652c66275cb71cc640e6364ea88ed95be0"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.normalize_source",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "56027ff25d3d34f96861e573c3c5bd5a16d133546839f1c67c0ef36e3b068e89"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.latest_cycles",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e33d845556fae0ade912a8f2ccb8b0dcff7d77fed4d409b64679c72ac391916d"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.select_cycle",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": "d045e60c80f745d5b72c985ba609ebf658a16833e30a8ee26601bd0aa07ff9b4"
+    },
+    {
+      "file": "gfs.py",
+      "symbol": "GfsManager.required_hours",
+      "origin": "compatibility",
+      "reason": "parameter_contract_and_runtime_environment",
+      "baseline_sha256": "bce76b6168c79f26c96449406318c2ec3532cedea67d3ea8daea681258ea5c6f"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "utc_now",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8d505536aff73c3bb47ca827e205cfcb4bc118abbfee5cee99ca6d77f931437e"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "epoch_now",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9d2eefeac85675d84e26e72b4152b0638011aef729d7f830e21d1a96ba0c1676"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "safe_cycle",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "c1b425371d9163c46cd88860ec601596953c7131af48dea280a1c054aee08f06"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "parse_hours",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "36782327434bc03105825d8d78bc5dd3f9590f8af33a7627699f60688dd64c6e"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "atomic_json",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "5206bfbd3fe766fd9f83511427adcbc51457db35e2ee1c62d2b934dc9e107351"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "read_json",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "7a1fc90822ab1a23396d29c5ecfe01414d9f226896c1816f7c012651d80b8e89"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "kernel_guard",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "exclusive",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "3015b22c23894e5f6d79b0a9b7751a222ab9bf0586da03738aa1bfb1d30ea0b1"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "legacy_exclusive",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "exclusive_process",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "d82fcacee35313d23f3e51c70d4bbcb4708f41845f4f7612d61a090ba6d30b66"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.__init__",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "4f86b89437f7b96ffd2a5277755f426349e6fa164a5a819d0166a7a8e0deb05d"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.expected_hours",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "91c3f64f3261d32ff3df312448e40097520d157acd902558b262846e1ffe9a3c"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.file_name",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "83e47449ab2d5d8d2cc8bf9b0fdbaf57253155e74d03a382e5f8700b446b9504"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.file_path",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "0af31fd19d2411c57e1b2a77d026a3c0541a9b3adc3b98f1dae5b428d58733c6"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.cycle_lock",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "737a89eda3ecb3eacefe4d7fcc793dc81d3b0f14d9556c0d45b6a5a638e7f127"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.default_state",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "618f369fe536f29b9cc5e07c45139e7b372973647ca8ee054661ec111bc66281"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.load_state",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "58c93c347a47712df303e55fba044b0ca74faceed3a7499c5686782e99f4a81f"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.snapshot",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.cleanup",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.save_state",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "bfd44210c4fd2684d6a703ad0df6b2002856ec79d459ac7bebc71b7e05a5a7fc"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.classify_error",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "3fb6f202db91c31a81e3f2c93515cd1dfb3c02091c521931699c6d7b337ad566"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.valid",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "049ecb25fdce764253d38d3dbe02b2317d152a6edd0bbc909a9a8e577cce9cfa"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.digest",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "a5606c3b32eaa826b661a0b4e3eeb3bc6ccf2828c7ee01f636b0c974d7e9041f"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.part_size",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "ed4ac6b52b177e8966467558f6c2480800eb69a2fa4b1829ef6e50e6a55d7505"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.url",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "e76df8e0e9e1de7db8aca27425d0964d17396e71a79f1326b3237098e623ea43"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.enqueue",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "a7c97f6726b6eba4da8180ea2397d9c2bea781691399e8cf026d504c2342b1d9"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.release_reference",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.forget",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8849871df25b5bfa8edeb2b031e1ae93fdb3f739ca8d7f86b48bed352327dd98"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._set_entry",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "8189594eb73c559b6c98efd144a14b3d43359953692d376a49cd6815322e9bc6"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._mark_publication",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9c50239faab039b6531a887f6d0fe86474a224e0f63469107c45bbbd0d246fdd"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.probe_published",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "2ba39506b01d666a073dec39d2c5e6a73fd0b0d060731e825f7941862ba9e2be"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._pick_next",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "f2830432f3705aa51168f8566492c175d49beeb8df0476ef735bceb959e3220e"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._retry_after",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "df347426a19c9cfae51ad09ad32000b52259633c78257e094c9a474a6e647709"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._http_status",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "bc2e3dba1e0884021cfbcbf96913cc6eb39b453cfb923c0f3ef80adde9dcfdb7"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._download_one",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "abce3449533811a7c602d1cfe975249e57d68f91aae1adbfcb7221c4893184a3"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._sibling_task_waiting",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": null
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._download_one_locked",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "2906acef86c65b467f4afda04415ed612fd002f96335c6eb8212d07405c56df5"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue._write_manifest_if_complete",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "06c78b9beca4741e965aca9349d25530ad29be746bab37c6202ca7efa2a3ab44"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.worker",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "59fbb7e1bfd396833648610ea9cd91f28e1d3c8d1647b5cf68ea28a9d08a13d1"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "PoolQueue.recover_interrupted_downloads",
+      "origin": "baseline",
+      "reason": null,
+      "baseline_sha256": "9abde9756869476dfe6a72f1b83f93f1e0988f9f657afd47036a91490f51c7b5"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "arguments",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "88786ab9c37d2e93415d3219983e9fb7e007951b83d4d47840d4fff2a8f36207"
+    },
+    {
+      "file": "scripts/forcing_pool_queue.py",
+      "symbol": "main",
+      "origin": "compatibility",
+      "reason": "single_queue_identity_reference_and_atomic_file_protection",
+      "baseline_sha256": "367b710cd1604c78563349baa4b2564a4e86901e176e56e9c5b0c5923a09e5d7"
+    },
+    {
+      "file": "task_manager.py",
+      "symbol": "guard_legacy_action",
+      "origin": "compatibility",
+      "reason": "operation_lock_deletion_fence_and_native_ask_policy",
+      "baseline_sha256": null
+    }
+  ],
+  "retained_modules": {
+    "config.py": "runtime root and fixed interpreter; no old shared paths",
+    "database.py": "existing task/attempt/metadata/plan/tombstone persistence; no data migration",
+    "schemas.py": "ui2 configurable spinup/vertical levels/nesting tree",
+    "domain_preview.py": "true projected tree geometry",
+    "configuration_profile.py": "ui2 contract and one generic physics template",
+    "planning.py": "shared normalized plan and immutable digest",
+    "recovery.py": "agent/manual confirmation compatibility",
+    "task_deletion.py": "precise deletion transaction, not delete_local",
+    "terminal_evidence.py": "managed/legacy/not_launched terminal proof",
+    "downscale_retired.py": "read-only 410 retirement boundary",
+    "scripts/apply_namelist_plan.py": "parameter propagation and independent fixed deployment"
+  },
+  "frontend": {
+    "baseline": "c177766",
+    "restored": [
+      "src/views/WrfStudio.vue",
+      "src/components/WrfTaskRun.vue"
+    ],
+    "retained": [
+      "src/components/WrfTaskConfig.vue",
+      "packages/wrf-ui",
+      "src/components/ProjMap.vue",
+      "src/components/WrfResultLayer.vue",
+      "src/utils/wrfTaskSummary.js"
+    ],
+    "compatibility": [
+      "src/components/WrfLegacyManagement.vue",
+      "src/api.js"
+    ]
+  }
+}

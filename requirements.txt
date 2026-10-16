@@ -5,6 +5,7 @@ numpy
 netCDF4
 Pillow
 pyproj>=3.6,<4
+f90nml>=1.4.4,<2
 rasterio>=1.3,<2
 pexpect>=4.9,<5
 python-dotenv

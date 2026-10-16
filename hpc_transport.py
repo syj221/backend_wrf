@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -14,6 +15,7 @@ import threading
 import textwrap
 import time
 import uuid
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -23,13 +25,11 @@ from config import Settings
 
 
 SAFE_TASK_ID = re.compile(r"^(?:wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}|wrf_agent_[0-9a-f]{32})$")
-SAFE_DOWNSCALE_TASK_ID = re.compile(r"^ds_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 SAFE_CYCLE = re.compile(r"^[0-9]{10}$")
 SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[^\s;|&<>`$(){}\[\]\\\"']*$")
 SAFE_GFS_NAME = re.compile(r"^gfs\.t[0-9]{2}z\.pgrb2\.0p25\.f([0-9]{3})$")
 SAFE_EC_NAME = re.compile(r"^ecmwf\.t[0-9]{2}z\.ifs\.0p25\.f([0-9]{3})\.grib2$")
 SAFE_OUTPUT_NAME = re.compile(r"^[A-Za-z0-9_.*?+:-]+$")
-SAFE_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 SAFE_STORAGE_UUID = re.compile(r"^[0-9A-Fa-f]{16,64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -59,6 +59,10 @@ def _safe_local_output_name(name: str) -> str:
 
 class HpcError(RuntimeError):
     pass
+
+
+class HpcCleanupBlockedError(HpcError):
+    """Remote cleanup explicitly refused before removing any files."""
 
 
 class HpcStorageError(HpcError):
@@ -115,10 +119,6 @@ class HpcClient:
             ("WRF_HPC_GEOG_DATA_PATH", settings.hpc_geog_dir),
             ("WRF_HPC_GFS_DOWNLOAD_SCRIPT", settings.hpc_gfs_download_script),
             ("WRF_HPC_RUNTIME_ENV", settings.hpc_runtime_env),
-            ("WRF_HPC_DOWNSCALE_INTERFACE_ROOT", settings.hpc_downscale_interface_root),
-            ("WRF_HPC_DOWNSCALE_CFD_TEMPLATE", settings.hpc_downscale_cfd_template),
-            ("WRF_HPC_DOWNSCALE_OPENFOAM_ACTIVATE", settings.hpc_downscale_openfoam_activate),
-            ("WRF_HPC_DOWNSCALE_PYTHON", settings.hpc_downscale_python),
             ("WRF_HPC_GFS_MOUNT", settings.hpc_gfs_mount),
         ):
             if not SAFE_REMOTE_ROOT.fullmatch(value):
@@ -560,7 +560,7 @@ class HpcClient:
             message = (result.stderr or result.stdout or "超算命令失败").strip()
             if re.search(r"WRF_STORAGE_(?:MOUNT_MISSING|LAYOUT_MISSING|ALIAS_CONFLICT)", message):
                 raise HpcStorageError(message)
-            if "permission denied" in message.lower():
+            if result.returncode == 255 and re.search(r"permission denied \((?:publickey|password|keyboard-interactive)", message, re.I):
                 if self.settings.hpc_auth_mode == "key":
                     raise HpcAuthError("tx-lab SSH 密钥认证失败，请安装或检查专用公钥")
                 raise HpcAuthError("需要输入超算登录密码")
@@ -601,9 +601,10 @@ class HpcClient:
             f"if test -z \"$storage_mount\"; then printf 'WRF_STORAGE_MOUNT_MISSING|uuid={self.settings.hpc_storage_uuid}'; exit 23; fi; "
             f"if ! test -d \"$storage_mount/WRFwork\"; then printf 'WRF_STORAGE_LAYOUT_MISSING|mount=%s' \"$storage_mount\"; exit 24; fi; "
             f"if ! test -f \"$storage_mount/WRFwork/.wrf-data-root\"; then printf 'WRF_STORAGE_LAYOUT_MISSING|marker=%s' \"$storage_mount/WRFwork/.wrf-data-root\"; exit 24; fi; "
-            f"if test -L {storage_alias}; then ln -sfn -- \"$storage_mount\" {storage_alias} 2>/dev/null || exit 25; "
+            f"if test -L {storage_alias}; then test \"$(readlink -f -- {storage_alias})\" = \"$(readlink -f -- \"$storage_mount\")\" || "
+            f"{{ printf 'WRF_STORAGE_ALIAS_CONFLICT|path={self.settings.hpc_storage_alias}'; exit 26; }}; "
             f"elif test -e {storage_alias}; then printf 'WRF_STORAGE_ALIAS_CONFLICT|path={self.settings.hpc_storage_alias}'; exit 26; "
-            f"else ln -s -- \"$storage_mount\" {storage_alias} 2>/dev/null || exit 25; fi; "
+            f"else printf 'WRF_STORAGE_ALIAS_CONFLICT|path={self.settings.hpc_storage_alias}'; exit 26; fi; "
         )
         remote_command = storage_bootstrap + remote_command
         if self._uses_session_transport():
@@ -1165,33 +1166,6 @@ class HpcClient:
             )
             completed_size += size
 
-    def download_downscale_bundle(
-        self,
-        task_id: str,
-        local_path: Path,
-        timeout: int = 1800,
-        progress: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        """Archive and download the validated remote CFD product bundle."""
-        remote_product = f"{self.downscale_output_dir(task_id)}/product"
-        remote_archive = self.downscale_bundle_path(task_id)
-        self.run(
-            f"test -s {self._quote_remote(remote_product)}/downscale.product.json || exit 1; "
-            f"rm -f {self._quote_remote(remote_archive)}.part; "
-            f"tar -czf {self._quote_remote(remote_archive)}.part -C {self._quote_remote(remote_product)} . && "
-            f"mv {self._quote_remote(remote_archive)}.part {self._quote_remote(remote_archive)}",
-            timeout=300,
-        )
-        local_path = Path(local_path)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._uses_session_transport():
-            self._download_file_session(remote_archive, local_path, timeout, progress=progress)
-        else:
-            self._run_direct([*self._scp_base(), f"{self.target}:{remote_archive}", str(local_path)], timeout)
-            if progress:
-                size = local_path.stat().st_size
-                progress(size, size)
-        return local_path
 
     def health(self) -> dict[str, Any]:
         try:
@@ -1217,13 +1191,16 @@ class HpcClient:
                 "if test -z \"$missing\"; then printf 'WRF_HPC_READY|gfs_free_gb=%s|runtime_free_gb=%s' \"$gfs_free\" \"$runtime_free\"; "
                 "elif test -z \"$hard_missing\" && test -n \"$space_missing\"; then "
                 "printf 'WRF_HPC_STORAGE_LOW|missing=%s|gfs_free_gb=%s|runtime_free_gb=%s' \"$missing\" \"$gfs_free\" \"$runtime_free\"; "
-                "else printf 'WRF_HPC_MISSING|missing=%s|gfs_free_gb=%s|runtime_free_gb=%s' \"$missing\" \"$gfs_free\" \"$runtime_free\"; fi",
+                "else printf 'WRF_HPC_MISSING|missing=%s|gfs_free_gb=%s|runtime_free_gb=%s' \"$missing\" \"$gfs_free\" \"$runtime_free\"; fi; "
+                "printf '|cpu_count=%s' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null)\"; "
+                "awk '/MemAvailable:/ {printf \"|memory_available_mb=%d\", $2/1024}' /proc/meminfo 2>/dev/null; "
+                "awk '{printf \"|load_average=%s\", $1}' /proc/loadavg 2>/dev/null",
                 timeout=self.settings.hpc_connect_timeout + 10,
             )
             ready = "WRF_HPC_READY" in output
             storage_unavailable = "GFS_MOUNT" in output or "GFS_IO" in output
             metrics: dict[str, int] = {}
-            for key, value in re.findall(r"(gfs_free_gb|runtime_free_gb)=([0-9]+)", output):
+            for key, value in re.findall(r"(gfs_free_gb|runtime_free_gb|cpu_count|memory_available_mb)=([0-9]+)", output):
                 metrics[key] = int(value)
             storage_low = "WRF_HPC_STORAGE_LOW" in output
             if ready:
@@ -1247,6 +1224,8 @@ class HpcClient:
                 "gfs_bounds": self.gfs_bounds,
                 "gfs_storage_path": self.settings.hpc_gfs_dir,
                 **metrics,
+                "configured_mpi_processes": self.settings.hpc_cpu_mpi_processes,
+                "load_average": float(re.search(r"load_average=([0-9.]+)", output)[1]) if re.search(r"load_average=([0-9.]+)", output) else None,
                 **self.connection_diagnostic,
             }
         except HpcStorageError as exc:
@@ -1286,228 +1265,78 @@ class HpcClient:
         if not SAFE_CYCLE.fullmatch(cycle):
             raise ValueError("非法 GFS cycle")
 
-    def service_dir(self) -> str:
+    def _task_runtime(self, task_id: str) -> dict[str, Any]:
+        self._assert_task_id(task_id)
+        path = self.settings.database_path
+        if not path.is_file():
+            return {}
+        try:
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+                row = db.execute("SELECT runtime_json FROM wrf_tasks WHERE id=?", (task_id,)).fetchone()
+            runtime = json.loads(row[0]) if row else {}
+            if not isinstance(runtime, dict):
+                raise ValueError("Invalid task runtime identity")
+            return runtime
+        except (sqlite3.Error, ValueError) as exc:
+            raise HpcError("Task runtime identity cannot be read; operation blocked") from exc
+
+    def _release_settings(self, task_id):
+        from dataclasses import replace
+        release = self._task_runtime(task_id).get("release_id")
+        return replace(self.settings, hpc_runtime_release=release) if release else self.settings
+
+    def service_dir(self, task_id: str | None = None) -> str:
+        release = self._task_runtime(task_id).get("release_id") if task_id else self.settings.hpc_runtime_release
+        if release:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", release) or not SAFE_REMOTE_ROOT.fullmatch(self.settings.hpc_release_root):
+                raise ValueError("Invalid immutable runtime release")
+            return f"{self.settings.hpc_release_root}/releases/{release}/scripts"
         return f"{self.settings.hpc_remote_dir}/backend_wrf_service"
+
+    def supervisor_script(self, task_id, *, verify=False):
+        runtime = self._task_runtime(task_id)
+        release = runtime.get('supervisor_release_id')
+        if not release: return self.service_dir(task_id) + '/managed_process.py'
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}', release):
+            raise HpcError('Invalid supervisor release binding')
+        if verify:
+            from dataclasses import replace
+            from runtime_release import require_ready
+            ready = require_ready(self, replace(self.settings, hpc_runtime_release=release), force=True)
+            if ready.get('fingerprint') != runtime.get('supervisor_fingerprint'):
+                raise HpcError('Supervisor fingerprint changed; launch refused')
+        return f'{self.settings.hpc_release_root}/releases/{release}/scripts/managed_process.py'
 
     def task_dir(self, task_id: str) -> str:
         self._assert_task_id(task_id)
+        runtime = self._task_runtime(task_id)
+        if runtime.get("remote_task_dir"):
+            value = str(runtime["remote_task_dir"])
+            if not SAFE_REMOTE_ROOT.fullmatch(value):
+                raise ValueError("Invalid historical task path")
+            return value
+        if runtime.get("release_id") and self.settings.hpc_workbench_data_root:
+            return f"{self.settings.hpc_workbench_data_root}/tasks/{task_id}/control"
         return f"{self.settings.hpc_remote_dir}/backend_wrf_tasks/{task_id}"
 
     def remote_output_dir(self, task_id: str) -> str:
         self._assert_task_id(task_id)
+        runtime = self._task_runtime(task_id)
+        if runtime.get("remote_output_dir"):
+            return str(runtime["remote_output_dir"])
+        if runtime.get("release_id") and runtime.get("launch_attempt"):
+            return f"{self.settings.hpc_workbench_data_root}/tasks/{task_id}/attempts/{runtime['launch_attempt']}/wrf/run"
         return f"{self.settings.hpc_remote_dir}/WRF_{task_id}/run"
 
-    def inspect_wrf_source(self, task_id: str) -> dict[str, Any]:
-        """Inventory stable native WRF files used by the high-resolution hand-off."""
-        output_dir = self.remote_output_dir(task_id)
-        quoted_dir = self._quote_remote(output_dir)
-        command = (
-            f"if test ! -d {quoted_dir}; then printf 'MISSING_DIR'; exit 0; fi; "
-            f"names=$(find -L {quoted_dir} -maxdepth 1 -type f "
-            "\\( -name 'wrfout_d04_*' -o -name 'wrfrst_d04_*' \\) -printf '%f\\n' | sort); "
-            "before=$(mktemp /tmp/wrf-source-inventory.XXXXXX); "
-            "trap 'rm -f \"$before\"' EXIT; "
-            "printf '%s\\n' \"$names\" | while IFS= read -r name; do "
-            "test -n \"$name\" || continue; "
-            f"printf '%s|%s\\n' \"$name\" \"$(wc -c < {quoted_dir}/\"$name\" 2>/dev/null | tr -d '[:space:]')\"; done > \"$before\"; "
-            "sleep 2; "
-            "while IFS='|' read -r name size1; do "
-            "test -n \"$name\" || continue; "
-            f"size2=$(wc -c < {quoted_dir}/\"$name\" 2>/dev/null | tr -d '[:space:]'); "
-            f"mtime=$(stat -c '%Y' {quoted_dir}/\"$name\" 2>/dev/null || printf 0); "
-            f"sha=$(sha256sum {quoted_dir}/\"$name\" 2>/dev/null | awk '{{print $1}}'); "
-            "case \"$name\" in wrfout_*) kind=history;; wrfrst_*) kind=restart;; *) continue;; esac; "
-            "printf '%s|%s|%s|%s|%s|%s\\n' \"$kind\" \"$name\" \"$size1\" \"$size2\" \"$mtime\" \"$sha\"; done < \"$before\""
-        )
-        raw = self.run(command, timeout=900)
-        if raw.strip() == "MISSING_DIR":
-            return {"remote_output_dir": output_dir, "files": [], "inventory_sha256": ""}
-        files: list[dict[str, Any]] = []
-        for line in raw.splitlines():
-            kind, separator, remainder = line.partition("|")
-            if not separator:
-                continue
-            name, separator, remainder = remainder.partition("|")
-            if not separator or not SAFE_OUTPUT_NAME.fullmatch(name):
-                continue
-            size_text, separator, remainder = remainder.partition("|")
-            if not separator:
-                continue
-            size2_text, separator, remainder = remainder.partition("|")
-            if not separator:
-                continue
-            mtime_text, separator, digest = remainder.partition("|")
-            if not separator:
-                continue
-            try:
-                size1, size2, mtime = int(size_text), int(size2_text), int(mtime_text)
-            except ValueError:
-                continue
-            files.append({
-                "kind": kind,
-                "name": name,
-                "size_bytes": size2,
-                "mtime_utc": datetime.fromtimestamp(mtime, timezone.utc).isoformat().replace("+00:00", "Z") if mtime > 0 else "",
-                "sha256": digest.lower(),
-                "stable": size1 == size2 and size2 > 0,
-            })
-        inventory_payload = json.dumps(files, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        return {
-            "remote_output_dir": output_dir,
-            "files": files,
-            "inventory_sha256": hashlib.sha256(inventory_payload).hexdigest(),
-        }
 
-    def _assert_downscale_task_id(self, task_id: str) -> None:
-        if not SAFE_DOWNSCALE_TASK_ID.fullmatch(task_id):
-            raise ValueError("非法高分辨率任务 ID")
 
-    def downscale_task_dir(self, task_id: str) -> str:
-        self._assert_downscale_task_id(task_id)
-        return f"{self.settings.hpc_remote_dir}/backend_wrf_downscale_tasks/{task_id}"
 
-    def downscale_output_dir(self, task_id: str) -> str:
-        self._assert_downscale_task_id(task_id)
-        # High-resolution native outputs are run assets. Keep them below the
-        # UUID-resolved data volume instead of the RUNTIME control directory,
-        # so a reboot or a changed mount label cannot silently fill /.
-        return f"{self.settings.hpc_storage_alias}/WRFwork/DOWNSCALE_{task_id}/run"
 
-    def downscale_bundle_path(self, task_id: str) -> str:
-        return f"{self.downscale_output_dir(task_id)}/downscale.product.bundle.tar.gz"
 
-    def prepare_downscale_runtime(
-        self, task_id: str, contract_path: Path, script_dir: Path,
-        surface_assets: list[tuple[Path, str]] | None = None,
-    ) -> None:
-        task_dir = self.downscale_task_dir(task_id)
-        service_dir = self.service_dir()
-        self.run(f"mkdir -p {self._quote_remote(task_dir)} {self._quote_remote(service_dir)}")
-        items = [
-            (script_dir / "wrf_hpc_downscale.sh", f"{service_dir}/wrf_hpc_downscale.sh"),
-            (script_dir / "wrf_hpc_downscale_chain.sh", f"{service_dir}/wrf_hpc_downscale_chain.sh"),
-            (script_dir / "wrf_hpc_downscale_chain.py", f"{service_dir}/wrf_hpc_downscale_chain.py"),
-            (script_dir / "wrf_hpc_cfd_10m_chain.py", f"{service_dir}/wrf_hpc_cfd_10m_chain.py"),
-            (script_dir / "wrf_hpc_cfd_chain.py", f"{service_dir}/wrf_hpc_cfd_chain.py"),
-            (script_dir / "wrf_hpc_cfd_case.py", f"{service_dir}/wrf_hpc_cfd_case.py"),
-            (script_dir / "wrf_hpc_cfd_products.py", f"{service_dir}/wrf_hpc_cfd_products.py"),
-            (script_dir / "cfd_support" / "build_wrf_cfd_interface.py", f"{service_dir}/build_wrf_cfd_interface.py"),
-            (script_dir / "cfd_support" / "apply_profile_boundaries.py", f"{service_dir}/apply_profile_boundaries.py"),
-            (script_dir / "wrf_storage_guard.sh", f"{service_dir}/wrf_storage_guard.sh"),
-            (contract_path, f"{task_dir}/downscale.job.json"),
-        ]
-        for local_path, remote_path in items:
-            self.upload(local_path, remote_path, timeout=600)
-        if surface_assets:
-            surface_dir = f"{task_dir}/surface"
-            self.run(f"mkdir -p {self._quote_remote(surface_dir)}; chmod 700 {self._quote_remote(surface_dir)}")
-            for local_path, safe_name in surface_assets:
-                if not re.fullmatch(r"[A-Za-z0-9_.-]+", safe_name):
-                    raise ValueError("非法地形资产文件名")
-                self.upload(local_path, f"{surface_dir}/{safe_name}", timeout=1800)
-        self.run(
-            f"chmod 700 {self._quote_remote(service_dir)}/wrf_hpc_downscale.sh "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_downscale_chain.sh "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_10m_chain.py "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_chain.py "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_case.py "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_products.py "
-            f"{self._quote_remote(service_dir)}/wrf_storage_guard.sh; "
-            f"chmod 600 {self._quote_remote(task_dir)}/downscale.job.json"
-        )
-        self.run(
-            f"python3 -m py_compile {self._quote_remote(service_dir)}/wrf_hpc_downscale_chain.py && "
-            f"{self._quote_remote(self.settings.hpc_downscale_python)} -m py_compile "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_10m_chain.py "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_case.py "
-            f"{self._quote_remote(service_dir)}/wrf_hpc_cfd_products.py",
-            timeout=120,
-        )
 
-    def launch_downscale(self, task_id: str) -> dict[str, Any]:
-        task_dir = self.downscale_task_dir(task_id)
-        service_dir = self.service_dir()
-        output_dir = self.downscale_output_dir(task_id)
-        # A retry reuses the isolated task directory and its completed stage
-        # markers, but process-control files belong to one launch attempt.
-        # Remove them before preflight so status polling cannot observe a
-        # previous non-zero exit while the new runner is already active.
-        self.run(
-            f"rm -f {self._quote_remote(task_dir)}/service.pid {self._quote_remote(task_dir)}/exit.code"
-        )
-        runtime = (
-            f"WORK_DIR={self._quote_remote(self.settings.hpc_remote_dir)} "
-            f"WRF_CPU_SOURCE_DIR={self._quote_remote(self.settings.hpc_wrf_source_dir)} "
-            f"WRF_RUNTIME_ENV={self._quote_remote(self.settings.hpc_runtime_env)} "
-            f"WRF_DOWNSCALE_CONTRACT={self._quote_remote(task_dir)}/downscale.job.json "
-            f"WRF_DOWNSCALE_TASK_DIR={self._quote_remote(task_dir)} "
-            f"WRF_DOWNSCALE_SURFACE_DIR={self._quote_remote(task_dir)}/surface "
-            f"WRF_DOWNSCALE_OUTPUT_DIR={self._quote_remote(output_dir)} "
-            f"WRF_DOWNSCALE_CFD_SCRIPT={self._quote_remote(service_dir)}/wrf_hpc_cfd_chain.py "
-            f"WRF_DOWNSCALE_CFD_10M_SCRIPT={self._quote_remote(service_dir)}/wrf_hpc_cfd_10m_chain.py "
-            f"WRF_DOWNSCALE_CFD_SCRIPT_DIR={self._quote_remote(service_dir)} "
-            f"WRF_DOWNSCALE_INTERFACE_ROOT={self._quote_remote(self.settings.hpc_downscale_interface_root)} "
-            f"WRF_DOWNSCALE_CFD_TEMPLATE={self._quote_remote(self.settings.hpc_downscale_cfd_template)} "
-            f"WRF_DOWNSCALE_OPENFOAM_ACTIVATE={self._quote_remote(self.settings.hpc_downscale_openfoam_activate)} "
-            f"WRF_DOWNSCALE_PYTHON={self._quote_remote(self.settings.hpc_downscale_python)} "
-            f"WRF_STORAGE_GUARD_SCRIPT={self._quote_remote(service_dir)}/wrf_storage_guard.sh "
-            f"WRF_STORAGE_ALIAS={self._quote_remote(self.settings.hpc_storage_alias)} "
-            f"WRF_STORAGE_UUID={self._quote_remote(self.settings.hpc_storage_uuid)} "
-            f"WRF_NDOWN_EXE={self._quote_remote(self.settings.hpc_wrf_source_dir)}/main/ndown.exe "
-            "WRF_DOWNSCALE_RUN_CHAIN=true "
-            "WRF_NONINTERACTIVE=true "
-        )
-        preflight = self.run(
-            f"cd {self._quote_remote(task_dir)} || exit 1; {runtime}WRF_DOWNSCALE_PREFLIGHT_ONLY=true "
-            f"bash {self._quote_remote(service_dir)}/wrf_hpc_downscale.sh",
-            timeout=300,
-        )
-        runner = (
-            f"printf '%s\\n' $$ > {self._quote_remote(task_dir)}/service.pid; "
-            f"{runtime}bash {self._quote_remote(service_dir)}/wrf_hpc_downscale.sh; "
-            f"code=$?; printf '%s\\n' \"$code\" > {self._quote_remote(task_dir)}/exit.code; exit \"$code\""
-        )
-        command = (
-            f"cd {self._quote_remote(task_dir)} || exit 1; "
-            f"nohup setsid bash -c {shlex.quote(runner)} "
-            f"> {self._quote_remote(task_dir)}/service.log 2>&1 < /dev/null & "
-            f"for attempt in 1 2 3 4 5 6 7 8 9 10; do "
-            f"test -s {self._quote_remote(task_dir)}/service.pid && break; sleep 0.1; done; "
-            f"cat {self._quote_remote(task_dir)}/service.pid"
-        )
-        pid = self.run(command).splitlines()[-1]
-        if not pid.isdigit():
-            raise HpcError("未获得远端高分辨率进程 ID")
-        return {"remote_pid": int(pid), "remote_task_dir": task_dir, "remote_output_dir": output_dir, "preflight": preflight.strip()}
 
-    def downscale_status(self, task_id: str) -> dict[str, Any]:
-        task_dir = self.downscale_task_dir(task_id)
-        quoted = self._quote_remote(task_dir)
-        state = self.run(
-            f"if test -f {quoted}/exit.code; then printf 'EXIT:'; cat {quoted}/exit.code; "
-            f"elif test -f {quoted}/service.pid && kill -0 \"$(cat {quoted}/service.pid)\" 2>/dev/null; then printf RUNNING; "
-            f"elif test -f {quoted}/service.pid; then printf LOST; else printf MISSING; fi"
-        ).strip()
-        log = self.run(f"tail -n 80 {quoted}/service.log 2>/dev/null || true", timeout=60)
-        if state.startswith("EXIT:0"):
-            return {"status": "succeeded", "log": log}
-        if state.startswith("EXIT:"):
-            return {"status": "failed", "exit_code": state.split(":", 1)[1].strip(), "log": log}
-        if state == "RUNNING":
-            return {"status": "running", "log": log}
-        return {"status": state.lower(), "log": log}
 
-    def inspect_downscale_forcing_manifest(self, output_dir: str) -> dict[str, Any] | None:
-        """Read one completed d08 manifest without downloading native forcing."""
-        expected_prefix = f"{self.settings.hpc_storage_alias.rstrip('/')}/WRFwork/DOWNSCALE_"
-        if not output_dir.startswith(expected_prefix) or not output_dir.endswith("/run"):
-            raise ValueError("约 10 m forcing 输出目录不在受管数据盘")
-        manifest_path = f"{output_dir}/mesoscale_forcing_manifest.json"
-        raw = self.run(f"cat {self._quote_remote(manifest_path)}", timeout=60)
-        value = json.loads(raw)
-        if not isinstance(value, dict):
-            raise ValueError("约 10 m forcing manifest 不是 JSON 对象")
-        return value
+
 
     def task_artifact_paths(self, task_id: str) -> list[str]:
         """返回同一任务尝试可清理的精确受管路径，不包含共享 GFS 数据池。"""
@@ -1538,16 +1367,18 @@ class HpcClient:
         expected_forcing_path: Path,
         script_dir: Path,
         progress: Callable[[str, int, int], None] | None = None,
-    ) -> None:
-        service_dir, task_dir = self.service_dir(), self.task_dir(task_id)
-        self.run(f"mkdir -p {service_dir} {task_dir}")
+    ) -> dict[str, Any]:
+        runtime = self._task_runtime(task_id)
+        if not runtime.get("release_id"):
+            raise HpcError("任务未固定普通 WRF 发布版本，拒绝向历史共享目录写入")
+        from runtime_release import require_ready
+        release = require_ready(self, self._release_settings(task_id), force=True)
+        if (release.get("release_id") != runtime["release_id"]
+                or release.get("fingerprint") != runtime.get("release_fingerprint")):
+            raise HpcError("任务发布版本指纹已改变，拒绝准备运行")
+        task_dir = self.task_dir(task_id)
+        self.run(f"mkdir -p {self._quote_remote(task_dir)}")
         items = [
-            (script_dir / "wrf.sh", f"{service_dir}/wrf.sh"),
-            (script_dir / "wrf_hpc_gfs.sh", f"{service_dir}/wrf_hpc_gfs.sh"),
-            (script_dir / "wrf_storage_guard.sh", f"{service_dir}/wrf_storage_guard.sh"),
-            (script_dir / "download_gfs_00z.sh", f"{service_dir}/download_gfs_00z.sh"),
-            (script_dir / "download_ecmwf_00z.sh", f"{service_dir}/download_ecmwf_00z.sh"),
-            (script_dir / "ecmwf_to_wps.filter", f"{service_dir}/ecmwf_to_wps.filter"),
             (config_path, f"{task_dir}/task.json"),
             (environment_path, f"{task_dir}/task.env"),
             (expected_forcing_path, f"{task_dir}/forcing.expected.tsv"),
@@ -1562,9 +1393,10 @@ class HpcClient:
             self.upload(path, remote, progress=item_progress)
             completed += path.stat().st_size
         self.run(
-            f"chmod 700 {service_dir}/wrf.sh {service_dir}/wrf_hpc_gfs.sh {service_dir}/wrf_storage_guard.sh {service_dir}/download_gfs_00z.sh {service_dir}/download_ecmwf_00z.sh; "
             f"chmod 600 {task_dir}/task.json {task_dir}/task.env {task_dir}/forcing.expected.tsv"
         )
+        return {"release_id": release.get("release_id"), "release_fingerprint": release.get("fingerprint"),
+                "remote_task_dir": task_dir}
 
     @staticmethod
     def _manifest_entry(item: Any, cycle: str) -> dict[str, Any] | None:
@@ -1702,6 +1534,7 @@ class HpcClient:
         cycle: str,
         horizon: int = 72,
         forecast_hours: list[int] | None = None,
+        reference: str | None = None,
     ) -> dict[str, Any]:
         """Enqueue a shared GFS download without waiting for the pool worker."""
         self._assert_cycle(cycle)
@@ -1716,24 +1549,25 @@ class HpcClient:
                 raise ValueError("GFS 下载时次必须位于 f000-f072")
         requested_spec = ",".join(str(hour) for hour in requested_hours)
         intent = "task" if forecast_hours is not None else "prefetch"
-        local_script = Path(__file__).resolve().parent / "scripts" / "download_gfs_00z.sh"
-        local_queue_script = Path(__file__).resolve().parent / "scripts" / "forcing_pool_queue.py"
-        remote_parent = posixpath.dirname(self.settings.hpc_gfs_download_script)
-        self.run(f"mkdir -p {self._quote_remote(remote_parent)}", timeout=60)
-        self.upload(local_queue_script, f"{remote_parent}/forcing_pool_queue.py", timeout=300)
-        self.upload(local_script, self.settings.hpc_gfs_download_script, timeout=300)
-        self.run(
-            f"chmod 700 {self._quote_remote(self.settings.hpc_gfs_download_script)} "
-            f"&& chmod 700 {self._quote_remote(f'{remote_parent}/forcing_pool_queue.py')}",
-            timeout=60,
-        )
-        script = self._quote_remote(self.settings.hpc_gfs_download_script)
+        if not self.settings.hpc_runtime_release:
+            local_script = Path(__file__).resolve().parent / "scripts" / "download_gfs_00z.sh"
+            local_queue_script = Path(__file__).resolve().parent / "scripts" / "forcing_pool_queue.py"
+            remote_parent = posixpath.dirname(self.settings.hpc_gfs_download_script)
+            self.run(f"mkdir -p {self._quote_remote(remote_parent)}", timeout=60)
+            self.upload(local_queue_script, f"{remote_parent}/forcing_pool_queue.py", timeout=300)
+            self.upload(local_script, self.settings.hpc_gfs_download_script, timeout=300)
+            self.run(
+                f"chmod 700 {self._quote_remote(self.settings.hpc_gfs_download_script)} "
+                f"&& chmod 700 {self._quote_remote(f'{remote_parent}/forcing_pool_queue.py')}",
+                timeout=60,
+            )
+        script = self._quote_remote(self._forcing_settings("gfs")["script"])
         log_dir = f"{self.settings.hpc_gfs_dir}/logs"
         log_path = f"{log_dir}/download_{cycle}.out"
         command = (
             f"if ! findmnt -rn -T {self._quote_remote(self.settings.hpc_gfs_mount)} >/dev/null 2>&1; "
             f"then printf 'ERROR|gfs_mount_unavailable'; "
-            f"elif ! test -x {script}; then printf 'ERROR|download_script_not_executable'; "
+            f"elif ! test -r {script}; then printf 'ERROR|download_script_unreadable'; "
             f"elif ! mkdir -p {self._quote_remote(self.settings.hpc_gfs_dir)} {self._quote_remote(log_dir)} 2>/dev/null; "
             "then printf 'ERROR|gfs_storage_io_error'; "
             f"elif ! probe=$(mktemp {self._quote_remote(log_dir)}/.start-probe.XXXXXX 2>/dev/null); "
@@ -1750,7 +1584,7 @@ class HpcClient:
             f"WRF_POOL_RETRY_MAX_SECONDS={self.settings.hpc_pool_retry_max_seconds} "
             f"WRF_POOL_PUBLISH_PROBE_SECONDS={self.settings.hpc_pool_publish_probe_seconds} "
             f"WRF_POOL_HISTORY_RETENTION_DAYS={self.settings.hpc_pool_history_retention_days} "
-            f"bash {script} {cycle} {horizon} {self._quote_remote(requested_spec)} {intent} "
+            f"bash {script} {cycle} {horizon} {self._quote_remote(requested_spec)} {intent} {self._quote_remote(reference or '')} "
             f"> {self._quote_remote(log_path)} 2>&1; tail -n 1 {self._quote_remote(log_path)}; fi"
         )
         state, _separator, detail = self.run(command, timeout=60).partition("|")
@@ -1759,7 +1593,7 @@ class HpcClient:
                 raise HpcError(f"tx-lab GFS 所在文件系统未就绪：{self.settings.hpc_gfs_mount}")
             if detail == "gfs_storage_io_error":
                 raise HpcError(f"tx-lab GFS 系统盘目录不可写：{self.settings.hpc_gfs_dir}")
-            raise HpcError("tx-lab GFS 下载脚本不存在或不可执行")
+            raise HpcError("tx-lab GFS 下载脚本不存在或不可读取")
         if state == "QUEUED":
             return {"cycle": cycle, "status": "queued", "detail": f"{intent}:{detail or requested_spec}"}
         return {"cycle": cycle, "status": state.lower(), "detail": detail}
@@ -1771,11 +1605,14 @@ class HpcClient:
         progress: Callable[[dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         protected_cycles: set[str] | None = None,
+        deadline_epoch: float | None = None,
     ) -> dict[str, Any]:
-        """Wait for task-priority pool files; a healthy queue has no fixed timeout."""
+        """Wait within the persisted task budget without stopping shared downloads."""
+        deadline = self._forcing_wait_deadline(deadline_epoch)
         result = self.inspect_gfs_files(cycle, forecast_hours)
         if result["complete"]:
             return result
+        self._forcing_wait_remaining(deadline, "GFS", cycle)
         trigger = self.trigger_gfs_download(cycle, 72, forecast_hours=forecast_hours)
         if trigger.get("status") in {"failed", "error"}:
             detail = str(trigger.get("detail") or "download process exited immediately")
@@ -1785,7 +1622,7 @@ class HpcClient:
         while True:
             if cancelled and cancelled():
                 raise HpcError("任务已取消等待；tx-lab 共享 GFS 下载继续运行")
-            time.sleep(self.settings.hpc_gfs_poll_seconds)
+            time.sleep(min(self.settings.hpc_gfs_poll_seconds, self._forcing_wait_remaining(deadline, "GFS", cycle)))
             result = self.inspect_gfs_files(cycle, forecast_hours)
             if progress:
                 progress({**result, "download": trigger})
@@ -1794,6 +1631,24 @@ class HpcClient:
             failure = self._queue_has_terminal_failure("gfs", cycle, result.get("missing_hours") or forecast_hours)
             if failure:
                 raise HpcError(f"tx-lab GFS {cycle} 必需驱动文件下载失败：{failure}")
+
+    def _forcing_wait_deadline(self, deadline_epoch: float | None) -> float:
+        # A monotonic cap also prevents wall-clock corrections from extending
+        # this invocation. The caller persists the UTC deadline across restarts.
+        budget = self.settings.hpc_forcing_wait_timeout_seconds
+        if deadline_epoch is not None and (not isinstance(deadline_epoch, (int, float)) or not math.isfinite(deadline_epoch)):
+            raise HpcError("驱动资料等待截止时间无效")
+        remaining = budget if deadline_epoch is None else min(budget, deadline_epoch - time.time())
+        if not isinstance(remaining, (int, float)) or not math.isfinite(remaining):
+            raise HpcError("驱动资料等待截止时间无效")
+        return time.monotonic() + max(0, remaining)
+
+    @staticmethod
+    def _forcing_wait_remaining(deadline: float, source: str, cycle: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HpcError(f"{source} {cycle} 驱动资料等待已达总时限；保留断点和任务输入，共享下载不被终止，请重新核验资料后申请恢复")
+        return remaining
 
     @staticmethod
     def _normalize_forcing_source(data_source: str) -> str:
@@ -1811,7 +1666,8 @@ class HpcClient:
                 "source": source,
                 "label": "GFS 全球 0.25°",
                 "root": self.settings.hpc_gfs_dir,
-                "script": self.settings.hpc_gfs_download_script,
+                "script": (f"{self.service_dir()}/download_gfs_00z.sh" if self.settings.hpc_runtime_release
+                           else self.settings.hpc_gfs_download_script),
                 "local_script": Path(__file__).resolve().parent / "scripts" / "download_gfs_00z.sh",
                 "file_glob": "gfs.t00z.pgrb2.0p25.f???",
                 "file_name": lambda hour: f"gfs.t00z.pgrb2.0p25.f{hour:03d}",
@@ -1828,7 +1684,8 @@ class HpcClient:
             "source": source,
             "label": "ECMWF 0.25°",
             "root": self.settings.hpc_ec_dir,
-            "script": self.settings.hpc_ec_download_script,
+            "script": (f"{self.service_dir()}/download_ecmwf_00z.sh" if self.settings.hpc_runtime_release
+                       else self.settings.hpc_ec_download_script),
             "local_script": Path(__file__).resolve().parent / "scripts" / "download_ecmwf_00z.sh",
             "file_glob": "ecmwf.t00z.ifs.0p25.f???.grib2",
             "file_name": lambda hour: f"ecmwf.t00z.ifs.0p25.f{hour:03d}.grib2",
@@ -1863,7 +1720,7 @@ class HpcClient:
         files = item.get("files") or {}
         entries = [
             entry for entry in files.values()
-            if isinstance(entry, dict) and entry.get("status") != "obsolete"
+            if isinstance(entry, dict) and entry.get("status") not in {"obsolete","cancelled"}
         ]
         statuses = {str(entry.get("status") or "") for entry in entries}
         now = int(time.time())
@@ -1879,18 +1736,18 @@ class HpcClient:
         pending_statuses = statuses - {"ready", "failed", "retry_wait"}
         if "downloading" in statuses:
             queue_status = "downloading"
-        elif pending_statuses - {"rate_limited", "waiting_publish"}:
-            queue_status = "downloading"
+        elif item.get("publication") == "expired":
+            queue_status = "cancelled"
+        elif str(item.get("publication") or "") in {"waiting_publish", "probing"} or "waiting_publish" in statuses:
+            queue_status = "waiting_publish"
         elif "rate_limited" in statuses:
             queue_status = "rate_limited"
-        elif str(item.get("publication") or "") in {"waiting_publish", "probing"}:
-            queue_status = "waiting_publish"
+        elif pending_statuses:
+            queue_status = "queued"
         elif failed_entries and len(retry_wait_entries) == len(failed_entries):
             queue_status = "retry_wait"
         elif "failed" in statuses or "retry_wait" in statuses:
             queue_status = "failed"
-        elif statuses - {"ready"}:
-            queue_status = "downloading"
         else:
             queue_status = ""
         current = next((entry for entry in entries if entry.get("status") == "downloading"), None)
@@ -1910,9 +1767,28 @@ class HpcClient:
             or ""
         )
         failure_class = str((latest_failure or {}).get("failure_class") or "")
+        wait_reason = ""
+        if queue_status == "queued":
+            active = next(((key, entry) for key, value in state.get("cycles", {}).items()
+                           for entry in (value.get("files") or {}).values()
+                           if isinstance(entry, dict) and entry.get("status") == "downloading"), None)
+            code = item.get("wait_code") if now - int(item.get("wait_observed_at") or 0) < 30 else ""
+            if active:
+                wait_reason = f"等待本源下载完成：{active[0]} · {active[1].get('current_file') or '当前文件'}"
+            elif code == "cycle_busy":
+                wait_reason = "等待本周期操作释放周期锁（下载或清理保护）"
+            elif code == "source_transfer_busy":
+                wait_reason = "等待本源传输槽释放（可能仍有下载子进程）"
+            elif retry_entries:
+                wait_reason = "等待本源下载重试时间到达"
+            else:
+                wait_reason = ("等待本源下载工作器调度" if state.get("transport_policy") == "per-provider-1"
+                               else "等待旧版工作器或共享传输槽；自然完成后切换为两源独立下载")
         return {
             "queue_status": queue_status,
-            "current_file": (current or {}).get("current_file") or item.get("active_file"),
+            "publication_status": str(item.get("publication") or ""),
+            "wait_reason": ("正在检查上游 f072 是否已发布" if item.get("publication")=="probing" else "上游完整周期尚未发布，等待 f072 发布确认") if queue_status=="waiting_publish" else wait_reason,
+            "current_file": (current or {}).get("current_file") or (item.get("active_file") if current else None),
             "download_rate_bps": int((current or {}).get("download_rate_bps") or 0),
             "retry_count": max((int(entry.get("attempts") or 0) for entry in entries), default=0),
             "retry_at": min((int(entry.get("retry_at") or 0) for entry in retry_entries), default=0),
@@ -2143,6 +2019,62 @@ class HpcClient:
             "manifest_is_regional": bool(candidates),
         }
 
+    def forcing_download_progress(self, data_source: str, cycle: str, forecast_hours: list[int]) -> dict[str, Any]:
+        """Observe only the requested hours using the existing queue telemetry."""
+        self._assert_cycle(cycle)
+        spec = self._forcing_settings(data_source)
+        state = self._pool_queue_state(spec["root"])
+        item = (state.get("cycles") or {}).get(cycle) or {}
+        files = item.get("files") or {}
+        selected = {f"{hour:03d}": files[f"{hour:03d}"] for hour in forecast_hours
+                    if isinstance(files.get(f"{hour:03d}"), dict)}
+        details = self._queue_cycle_details({"cycles": {cycle: {**item, "files": selected}}}, cycle)
+        statuses = {entry.get("status") for entry in selected.values()}
+        status = details.get("queue_status") or "unknown"
+        if statuses and statuses <= {"ready", "queued"} and "queued" in statuses:
+            status = "queued"
+        # Raw downloader errors can contain credentials or remote paths.
+        failure_class = details.get("failure_class") or "unknown"
+        messages = {"storage": "下载空间不足", "network": "下载网络异常",
+                    "rate_limited": "上游限流", "not_published": "等待上游发布"}
+        error = (messages.get(failure_class, "资料下载失败，请查看运维记录")
+                 if details.get("last_error") else None)
+        return {"status": status, "last_error": error,
+                "retry_count": details.get("retry_count", 0),
+                "next_retry_at": details.get("next_retry_at", 0),
+                "download_rate_bps": details.get("download_rate_bps", 0),
+                "queued_hours": sorted(int(key) for key, entry in selected.items() if entry.get("status") == "queued"),
+                "failed_hours": sorted(int(key) for key, entry in selected.items() if entry.get("status") == "failed"),
+                "untracked_hours": sorted(set(forecast_hours) - {int(key) for key in selected})}
+
+    def validate_forcing_semantics(self, task_id, data_source, cycle, hours, bounds):
+        self._assert_cycle(cycle)
+        source = self._normalize_forcing_source(data_source)
+        spec = self._forcing_settings(source)
+        script_dir = self.service_dir(task_id)
+        with sqlite3.connect(self.settings.database_path.as_uri() + "?mode=ro", uri=True) as db:
+            row = db.execute("SELECT request_json FROM wrf_tasks WHERE id=?", (task_id,)).fetchone()
+        request = json.loads(row[0]) if row else {}
+        input_domains = (((request.get('namelist') or {}).get('input') or {}).get('domains') or {})
+        p_top_pa = input_domains.get('p_top_requested', 5000)
+        if isinstance(p_top_pa, list): p_top_pa = p_top_pa[0]
+        program = (
+            "import sys,json,datetime; sys.path.insert(0,sys.argv[1]); from validate_forcing import validate; from pathlib import Path; "
+            "items=json.loads(sys.argv[2]); reports=[validate(Path(i['path']),i['time'],i['bounds'],i['p_top_pa']) for i in items]; "
+            "print(json.dumps({'schema':'wrf-forcing-set-validation-1','valid':all(i['valid'] for i in reports),'files':reports}))"
+        )
+        start = datetime.strptime(cycle, "%Y%m%d%H")
+        items = [{"path": f"{spec['root']}/{cycle}/{spec['file_name'](int(hour))}",
+                  "time": (start + timedelta(hours=int(hour))).strftime("%Y%m%d%H%M"), "bounds": bounds,
+                  "p_top_pa": p_top_pa or 5000} for hour in hours]
+        command = (". " + shlex.quote(posixpath.dirname(script_dir) + "/runtime.env") + " >/dev/null 2>&1 && "
+                   + " ".join(shlex.quote(v) for v in (self.settings.hpc_runtime_python, "-B", "-c", program, script_dir, json.dumps(items))))
+        report = json.loads(self.run(command, timeout=1800))
+        if report.get("schema") != "wrf-forcing-set-validation-1" or not report.get("valid"):
+            issues = sorted({code for item in report.get("files", []) for code in item.get("issues", [])})
+            raise HpcError("驱动资料语义校验未通过：" + ", ".join(issues or ["invalid_validation_contract"]))
+        return report
+
     def _manifest_entry_forcing(self, data_source: str, item: Any, cycle: str) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
@@ -2167,10 +2099,11 @@ class HpcClient:
         cycle: str,
         horizon: int = 72,
         forecast_hours: list[int] | None = None,
+        reference: str | None = None,
     ) -> dict[str, Any]:
         source = self._normalize_forcing_source(data_source)
         if source == "gfs":
-            return self.trigger_gfs_download(cycle, horizon, forecast_hours)
+            return self.trigger_gfs_download(cycle, horizon, forecast_hours,reference=reference) if reference else self.trigger_gfs_download(cycle,horizon,forecast_hours)
         self._assert_cycle(cycle)
         if cycle[8:10] != "00":
             raise ValueError("当前 WRF 数据池仅允许触发 00Z 周期")
@@ -2190,16 +2123,17 @@ class HpcClient:
             )
         requested_spec = ",".join(str(hour) for hour in requested_hours)
         intent = "task" if forecast_hours is not None else "prefetch"
-        remote_parent = posixpath.dirname(spec["script"])
-        self.run(f"mkdir -p {self._quote_remote(remote_parent)}", timeout=60)
-        local_queue_script = Path(__file__).resolve().parent / "scripts" / "forcing_pool_queue.py"
-        self.upload(local_queue_script, f"{remote_parent}/forcing_pool_queue.py", timeout=300)
-        self.upload(spec["local_script"], spec["script"], timeout=300)
-        self.run(
-            f"chmod 700 {self._quote_remote(spec['script'])} "
-            f"&& chmod 700 {self._quote_remote(f'{remote_parent}/forcing_pool_queue.py')}",
-            timeout=60,
-        )
+        if not self.settings.hpc_runtime_release:
+            remote_parent = posixpath.dirname(spec["script"])
+            self.run(f"mkdir -p {self._quote_remote(remote_parent)}", timeout=60)
+            local_queue_script = Path(__file__).resolve().parent / "scripts" / "forcing_pool_queue.py"
+            self.upload(local_queue_script, f"{remote_parent}/forcing_pool_queue.py", timeout=300)
+            self.upload(spec["local_script"], spec["script"], timeout=300)
+            self.run(
+                f"chmod 700 {self._quote_remote(spec['script'])} "
+                f"&& chmod 700 {self._quote_remote(f'{remote_parent}/forcing_pool_queue.py')}",
+                timeout=60,
+            )
         log_dir = f"{spec['root']}/logs"
         log_path = f"{log_dir}/download_{cycle}.out"
         command = (
@@ -2210,7 +2144,7 @@ class HpcClient:
             f"WRF_POOL_RETRY_MAX_SECONDS={self.settings.hpc_pool_retry_max_seconds} "
             f"WRF_POOL_PUBLISH_PROBE_SECONDS={self.settings.hpc_pool_publish_probe_seconds} "
             f"WRF_POOL_HISTORY_RETENTION_DAYS={self.settings.hpc_pool_history_retention_days} "
-            f"bash {self._quote_remote(spec['script'])} {cycle} {horizon} {self._quote_remote(requested_spec)} {intent} "
+            f"bash {self._quote_remote(spec['script'])} {cycle} {horizon} {self._quote_remote(requested_spec)} {intent} {self._quote_remote(reference or '')} "
             f"> {self._quote_remote(log_path)} 2>&1; tail -n 1 {self._quote_remote(log_path)}"
         )
         state, _separator, detail = self.run(command, timeout=60).partition("|")
@@ -2228,14 +2162,17 @@ class HpcClient:
         progress: Callable[[dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         protected_cycles: set[str] | None = None,
+        deadline_epoch: float | None = None,
     ) -> dict[str, Any]:
         source = self._normalize_forcing_source(data_source)
         if source == "gfs":
-            return self.ensure_remote_gfs(cycle, forecast_hours, progress, cancelled, protected_cycles)
+            return self.ensure_remote_gfs(cycle, forecast_hours, progress, cancelled, protected_cycles, deadline_epoch)
         spec = self._forcing_settings(source)
+        deadline = self._forcing_wait_deadline(deadline_epoch)
         result = self.inspect_forcing_files(source, cycle, forecast_hours)
         if result["complete"]:
             return result
+        self._forcing_wait_remaining(deadline, "ECMWF", cycle)
         trigger = self.trigger_forcing_download(source, cycle, 72, forecast_hours=forecast_hours)
         if trigger.get("status") in {"failed", "error"}:
             raise HpcError(f"tx-lab ECMWF {cycle} 下载启动失败：{trigger.get('detail') or 'unknown'}")
@@ -2244,7 +2181,7 @@ class HpcClient:
         while True:
             if cancelled and cancelled():
                 raise HpcError("任务已取消等待；tx-lab 共享 ECMWF 下载继续运行")
-            time.sleep(int(spec["poll_seconds"]))
+            time.sleep(min(int(spec["poll_seconds"]), self._forcing_wait_remaining(deadline, "ECMWF", cycle)))
             result = self.inspect_forcing_files(source, cycle, forecast_hours)
             if progress:
                 progress({**result, "download": trigger})
@@ -2282,7 +2219,7 @@ class HpcClient:
             "awk -F'|' '{key=$1; sub(/\\.part.*/, \"\", key); if ($2 > largest[key]) largest[key]=$2} "
             "END {for (key in largest) {count+=1; size+=largest[key]} printf \"%d %d\", count, size}'); "
             "partial_count=${partial_stats%% *}; partial_size=${partial_stats#* }; "
-            "last=$(find \"$dir\" -maxdepth 1 -type f -name 'gfs.t00z.pgrb2.0p25.f???' -printf '%f\\n' 2>/dev/null | sed -n 's/.*f\\([0-9][0-9][0-9]\\)$/\\1/p' | sort -n | tail -1); "
+            "hours=$(find \"$dir\" -maxdepth 1 -type f -name 'gfs.t00z.pgrb2.0p25.f???' -printf '%f\\n' 2>/dev/null | sed -n 's/.*f\\([0-9][0-9][0-9]\\)$/\\1/p' | sort -n | paste -sd, -); last=${hours##*,}; printf 'HOURS|%s|%s\\n' \"$cycle\" \"$hours\"; "
             "complete=1; hour=0; while test \"$hour\" -le 72; do fh=$(printf '%03d' \"$hour\"); "
             "test -s \"$dir/gfs.t00z.pgrb2.0p25.f$fh\" || complete=0; hour=$((hour + 1)); done; "
             "log=\"logs/download_${cycle}.out\"; message=''; "
@@ -2295,7 +2232,13 @@ class HpcClient:
         )
         remote_root = ""
         cycles: list[dict[str, Any]] = []
+        available_hours: dict[str, list[int]] = {}
         for line in output.splitlines():
+            if line.startswith("HOURS|"):
+                _, key, values = line.split("|",2)
+                if SAFE_CYCLE.fullmatch(key):
+                    available_hours[key] = sorted({int(value) for value in values.split(",") if value.isdigit() and 0 <= int(value) <= 72})
+                continue
             if line.startswith("ROOT|"):
                 remote_root = line.partition("|")[2].strip().rstrip("/")
                 continue
@@ -2314,7 +2257,7 @@ class HpcClient:
             if status != "ready" and queue_details.get("queue_status"):
                 effective_status = str(queue_details["queue_status"])
             if (
-                effective_status not in {"ready", "downloading", "rate_limited", "waiting_publish", "retry_wait"}
+                effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
                 and self._is_terminal_pool_message(download_message)
             ):
                 effective_status = "error"
@@ -2341,7 +2284,8 @@ class HpcClient:
                 {
                     "cycle": cycle,
                     "status": effective_status,
-                    "forecast_start": 0 if int(count) else None,
+                    "forecast_start": min(available_hours[cycle]) if available_hours.get(cycle) else None,
+                    "available_hours": available_hours.get(cycle),
                     "forecast_end": int(last) if int(count) else None,
                     "completed_files": int(count),
                     "total_files": 73,
@@ -2378,7 +2322,7 @@ class HpcClient:
                 not item["target"]
                 and not item["protected"]
                 and not item["retained_complete"]
-                and item["status"] not in {"downloading", "rate_limited", "waiting_publish"}
+                and item["status"] not in {"downloading", "queued", "rate_limited", "waiting_publish"}
                 and item["remote_path"]
             )
             item["immediate_cleanup_allowed"] = bool(
@@ -2394,7 +2338,7 @@ class HpcClient:
             elif item["retained_complete"]:
                 item["cleanup_state"] = "protected"
                 item["cleanup_reason"] = "complete_fallback_window"
-            elif item["status"] in {"downloading", "rate_limited", "waiting_publish"}:
+            elif item["status"] in {"downloading", "queued", "rate_limited", "waiting_publish"}:
                 item["cleanup_state"] = "active"
                 item["cleanup_reason"] = "download_in_progress"
             elif item["immediate_cleanup_allowed"]:
@@ -2414,6 +2358,8 @@ class HpcClient:
             overall = "rate_limited"
         elif any(item["status"] == "downloading" for item in cycles):
             overall = "downloading"
+        elif any(item["status"] == "queued" for item in cycles):
+            overall = "queued"
         elif any(item["status"] == "waiting_publish" for item in cycles):
             overall = "waiting_publish"
         elif targets_complete:
@@ -2485,7 +2431,7 @@ class HpcClient:
             "awk -F'|' '{key=$1; sub(/\\.part.*/, \"\", key); if ($2 > largest[key]) largest[key]=$2} "
             "END {for (key in largest) {count+=1; size+=largest[key]} printf \"%d %d\", count, size}'); "
             "partial_count=${partial_stats%% *}; partial_size=${partial_stats#* }; "
-            f"last=$(find \"$dir\" -maxdepth 1 -type f -name '{spec['file_glob']}' -printf '%f\\n' 2>/dev/null | sed -n 's/.*f\\([0-9][0-9][0-9]\\)\\.grib2$/\\1/p' | sort -n | tail -1); "
+            f"hours=$(find \"$dir\" -maxdepth 1 -type f -name '{spec['file_glob']}' -printf '%f\\n' 2>/dev/null | sed -n 's/.*f\\([0-9][0-9][0-9]\\)\\.grib2$/\\1/p' | sort -n | paste -sd, -); last=${{hours##*,}}; printf 'HOURS|%s|%s\\n' \"$cycle\" \"$hours\"; "
             + expected_files_check
             + "log=\"logs/download_${cycle}.out\"; message=''; "
             "test -s \"$log\" && message=$(tail -n 1 \"$log\" | tr '|\\r\\n' '   ' | cut -c1-240); "
@@ -2497,7 +2443,13 @@ class HpcClient:
         )
         remote_root = ""
         cycles: list[dict[str, Any]] = []
+        available_hours: dict[str, list[int]] = {}
         for line in output.splitlines():
+            if line.startswith("HOURS|"):
+                _, key, values = line.split("|",2)
+                if SAFE_CYCLE.fullmatch(key):
+                    available_hours[key] = sorted({int(value) for value in values.split(",") if value.isdigit() and 0 <= int(value) <= 72})
+                continue
             if line.startswith("ROOT|"):
                 remote_root = line.partition("|")[2].strip().rstrip("/")
                 continue
@@ -2510,7 +2462,7 @@ class HpcClient:
             if status != "ready" and queue_details.get("queue_status"):
                 effective_status = str(queue_details["queue_status"])
             if (
-                effective_status not in {"ready", "downloading", "rate_limited", "waiting_publish", "retry_wait"}
+                effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
                 and self._is_terminal_pool_message(download_message)
             ):
                 effective_status = "error"
@@ -2537,7 +2489,8 @@ class HpcClient:
                 {
                     "cycle": cycle,
                     "status": effective_status,
-                    "forecast_start": 0 if int(count) else None,
+                    "forecast_start": min(available_hours[cycle]) if available_hours.get(cycle) else None,
+                    "available_hours": available_hours.get(cycle),
                     "forecast_end": int(last) if int(count) else None,
                     "completed_files": int(count),
                     "total_files": spec["total_files"],
@@ -2571,7 +2524,7 @@ class HpcClient:
             item["cleanup_allowed"] = bool(
                 not item["target"] and not item["protected"]
                 and not item["retained_complete"]
-                and item["status"] not in {"downloading", "rate_limited", "waiting_publish"}
+                and item["status"] not in {"downloading", "queued", "rate_limited", "waiting_publish"}
                 and item["remote_path"]
             )
             item["immediate_cleanup_allowed"] = bool(
@@ -2587,7 +2540,7 @@ class HpcClient:
             elif item["retained_complete"]:
                 item["cleanup_state"] = "protected"
                 item["cleanup_reason"] = "complete_fallback_window"
-            elif item["status"] in {"downloading", "rate_limited", "waiting_publish"}:
+            elif item["status"] in {"downloading", "queued", "rate_limited", "waiting_publish"}:
                 item["cleanup_state"] = "active"
                 item["cleanup_reason"] = "download_in_progress"
             elif item["immediate_cleanup_allowed"]:
@@ -2607,6 +2560,8 @@ class HpcClient:
             overall = "rate_limited"
         elif any(item["status"] == "downloading" for item in cycles):
             overall = "downloading"
+        elif any(item["status"] == "queued" for item in cycles):
+            overall = "queued"
         elif any(item["status"] == "waiting_publish" for item in cycles):
             overall = "waiting_publish"
         elif targets_complete:
@@ -2675,293 +2630,261 @@ class HpcClient:
         result = self.cleanup_forcing_cycles(source, requested, target_cycles, protected_cycles)
         return {"requested": requested, **result}
 
+    def release_forcing_reference(self, source, cycle, reference):
+        spec = self._forcing_settings(self._normalize_forcing_source(source))
+        self._assert_cycle(cycle)
+        if not re.fullmatch(r"forcing_[a-f0-9]{32}",reference):
+            raise ValueError("下载引用无效")
+        queue = posixpath.join(posixpath.dirname(spec["script"]),"forcing_pool_queue.py")
+        command = " ".join(shlex.quote(value) for value in (
+            self.settings.hpc_runtime_python,"-B",queue,"release","--source",source,
+            "--root",spec["root"],"--cycle",cycle,"--reference",reference))
+        result = json.loads(self.run(command,timeout=60))
+        if result != {"reference":reference,"status":"released"}:
+            raise HpcError("下载引用取消响应不明确")
+        return result
+
+    def expire_forcing_prefetch(self, source, keep):
+        spec = self._forcing_settings(self._normalize_forcing_source(source))
+        queue = posixpath.join(posixpath.dirname(spec["script"]),"forcing_pool_queue.py")
+        command = " ".join(shlex.quote(value) for value in (self.settings.hpc_runtime_python,"-B",queue,
+            "expire-prefetch","--source",source,"--root",spec["root"],"--keep-cycles",','.join(keep)))
+        result = json.loads(self.run(command,timeout=30))
+        if result != {"status":"expired"}:
+            raise HpcError("旧预取引用释放结果不明，禁止清理")
+        return result
+
+    def snapshot_forcing_cycles(self, data_source: str, paths: list[str], operation_timeout: float = 600) -> list[dict[str, Any]]:
+        source = self._normalize_forcing_source(data_source)
+        spec = self._forcing_settings(source)
+        root = str(spec["root"]).rstrip("/")
+        queue = posixpath.join(posixpath.dirname(spec["script"]),"forcing_pool_queue.py")
+        results = []
+        if not paths:
+            return results
+        # Pool listings use pwd -P; resolve only the configured trusted root,
+        # never a caller-supplied cycle path or an unrelated project directory.
+        resolved_root = self.run(
+            f"cd {self._quote_remote(root)} && pwd -P", timeout=30).strip().rstrip("/")
+        if (not posixpath.isabs(resolved_root) or not SAFE_REMOTE_ROOT.fullmatch(resolved_root)
+                or posixpath.normpath(resolved_root) != resolved_root):
+            raise HpcError("无法确认资料池规范路径")
+        for path in paths:
+            cycle = posixpath.basename(path)
+            if posixpath.dirname(path) not in {root, resolved_root} or not SAFE_CYCLE.fullmatch(cycle):
+                raise ValueError("拒绝核验非受管资料路径")
+            command = " ".join(shlex.quote(value) for value in (
+                self.settings.hpc_runtime_python,"-B",queue,"snapshot","--source",source,
+                "--root",resolved_root,"--cycle",cycle))
+            runner=self.run_hash if hasattr(type(self),"run_hash") else self.run
+            item = json.loads(runner(command,timeout=operation_timeout))
+            if item.get("cycle") != cycle or item.get("path") != posixpath.join(resolved_root,cycle) or not re.fullmatch(r"[a-f0-9]{64}",str(item.get("digest") or "")):
+                raise HpcError("资料指纹核验响应不完整")
+            results.append({**item,"resolved_path":item["path"],"path":path})
+        return results
+
     def cleanup_forcing_cycles(
         self,
         data_source: str,
         paths: list[str],
         target_cycles: list[str],
         protected_cycles: set[str],
+        expected_snapshots: list[dict[str, Any]] | None = None,
+        operation_timeout: float = 120,
     ) -> dict[str, Any]:
         source = self._normalize_forcing_source(data_source)
-        if source == "gfs":
-            return self.cleanup_gfs_cycles(paths, target_cycles, protected_cycles)
         spec = self._forcing_settings(source)
         requested = list(dict.fromkeys(str(path).rstrip("/") for path in paths))
         if not requested:
-            raise ValueError("至少选择一个待清理的 tx-lab ECMWF 周期")
-        pool = self.forcing_pool_items(source, target_cycles, protected_cycles)[0]
+            raise ValueError("至少选择一个待清理的资料周期")
+        pool = (self.gfs_pool_items(target_cycles, protected_cycles) if source == "gfs"
+                else self.forcing_pool_items(source, target_cycles, protected_cycles))[0]
         allowed = set(pool.get("cleanup_candidates") or [])
-        refused = [path for path in requested if path not in allowed]
+        refused = [path for path in requested if path not in allowed or posixpath.basename(path) in protected_cycles]
         if refused:
             raise ValueError(f"以下路径当前不允许清理：{', '.join(refused)}")
         root = str(pool.get("remote_root") or "").rstrip("/")
-        if not root:
-            raise HpcError("无法确认 tx-lab ECMWF 数据池绝对路径")
-        commands: list[str] = []
-        cycle_items = {item["remote_path"]: item for item in pool.get("cycles") or []}
+        if not root or not root.startswith("/"):
+            raise HpcError("无法确认资料池绝对路径")
+        queue_script = posixpath.join(posixpath.dirname(spec["script"]), "forcing_pool_queue.py")
+        fingerprints = {item["path"]:item["digest"] for item in expected_snapshots or []}
+        if expected_snapshots is not None and set(fingerprints) != set(requested):
+            raise ValueError("资料批准清单与请求路径不一致")
+        commands = []
         for path in requested:
             cycle = posixpath.basename(path)
             if not SAFE_CYCLE.fullmatch(cycle) or posixpath.dirname(path) != root:
-                raise ValueError(f"拒绝清理非受管 ECMWF 周期目录：{path}")
-            quoted_path = shlex.quote(path)
-            cycle_lock = self._quote_remote(f"{root}/.pool-cycle-{cycle}.lock")
-            remove_cycle = shlex.quote(f"rm -rf -- {quoted_path}")
-            pattern = shlex.quote(f"[d]ownload_ecmwf_00z.sh {cycle}")
-            item = cycle_items.get(path) or {}
-            reason = (
-                "empty_residue" if item.get("empty_residue")
-                else "terminal_failure" if item.get("terminal_failure")
-                else "obsolete_cycle"
-            )
-            size_bytes = int(item.get("size_bytes") or 0) + int(item.get("partial_size_bytes") or 0)
-            forget = self._forget_queue_command("ecmwf", spec["script"], root, cycle)
-            history = self._cleanup_history_command(
-                root, "ecmwf", cycle, size_bytes, reason,
-                str(item.get("failure_class") or ""), str(item.get("last_error") or ""),
-            )
-            log_path = self._quote_remote(f"{root}/logs/download_{cycle}.out")
-            commands.append(
-                f"if ! command -v flock >/dev/null 2>&1; then printf 'BLOCKED|%s\\n' {quoted_path}; "
-                f"elif pgrep -f {pattern} >/dev/null 2>&1; then "
-                f"printf 'BLOCKED|%s\\n' {quoted_path}; "
-                f"elif test -d {quoted_path}; then if flock -n {cycle_lock} -c {remove_cycle}; then {forget}; rm -f -- {log_path}; {history}; printf 'DELETED|%s\\n' {quoted_path}; else printf 'BLOCKED|%s\\n' {quoted_path}; fi; "
-                f"else {forget}; rm -f -- {log_path}; printf 'MISSING|%s\\n' {quoted_path}; fi"
-            )
-        output = self.run("; ".join(commands), timeout=120)
-        deleted: list[str] = []
-        missing: list[str] = []
-        blocked: list[str] = []
-        errors: list[str] = []
+                raise ValueError(f"拒绝清理非受管资料周期目录：{path}")
+            # Old scripts without this action fail closed. Never upload or
+            # fall back to an uncoordinated rm command during cleanup.
+            arguments = [
+                self.settings.hpc_runtime_python, "-B", queue_script, "cleanup",
+                "--source", source, "--root", root, "--cycle", cycle,
+            ]
+            if path in fingerprints:
+                arguments.extend(["--expected-digest",fingerprints[path]])
+            command = " ".join(shlex.quote(value) for value in arguments)
+            commands.append(command)
+        runner=self.run_hash if hasattr(type(self),"run_hash") else self.run
+        output = runner(" && ".join(commands), timeout=operation_timeout)
+        observed: dict[str, str] = {}
         for line in output.splitlines():
             state, separator, path = line.partition("|")
             if not separator or path not in requested:
                 continue
-            if state == "DELETED":
-                deleted.append(path)
-            elif state == "MISSING":
-                missing.append(path)
-            elif state == "BLOCKED":
-                blocked.append(path)
-            elif state == "ERROR":
-                errors.append(path)
+            if state not in {"DELETED", "MISSING", "BLOCKED", "ERROR"} or path in observed:
+                raise HpcError("资料清理响应冲突，结果未知；请只读核验审计，禁止自动重放")
+            observed[path] = state
+        unknown = [path for path in requested if path not in observed]
+        if unknown:
+            raise HpcError("资料清理响应不完整，结果未知；请只读核验审计，禁止自动重放")
+        blocked = [path for path, state in observed.items() if state == "BLOCKED"]
+        errors = [path for path, state in observed.items() if state == "ERROR"]
         if blocked:
-            raise HpcError(f"周期下载进程仍在运行，未清理：{', '.join(blocked)}")
+            raise HpcCleanupBlockedError(f"资料下载或进程身份尚未核验，未清理：{', '.join(blocked)}")
         if errors:
-            raise HpcError(f"周期目录删除失败，未清理：{', '.join(errors)}")
-        return {"deleted": deleted, "missing": missing}
+            raise HpcError(f"资料清理失败，请核验审计：{', '.join(errors)}")
+        return {"deleted": [path for path, state in observed.items() if state == "DELETED"],
+                "missing": [path for path, state in observed.items() if state == "MISSING"]}
 
     def cleanup_gfs_cycles(
-        self,
-        paths: list[str],
-        target_cycles: list[str],
-        protected_cycles: set[str],
+        self, paths: list[str], target_cycles: list[str], protected_cycles: set[str],
     ) -> dict[str, Any]:
-        """只删除数据池当前明确标记为可清理的精确周期路径。"""
-        requested = list(dict.fromkeys(str(path).rstrip("/") for path in paths))
-        if not requested:
-            raise ValueError("至少选择一个待清理的 tx-lab GFS 周期")
-        pool = self.gfs_pool_items(target_cycles, protected_cycles)[0]
-        allowed = set(pool.get("cleanup_candidates") or [])
-        refused = [path for path in requested if path not in allowed]
-        if refused:
-            raise ValueError(f"以下路径当前不允许清理：{', '.join(refused)}")
-        root = str(pool.get("remote_root") or "").rstrip("/")
-        if not root:
-            raise HpcError("无法确认 tx-lab GFS 数据池绝对路径")
-        commands: list[str] = []
-        cycle_items = {item["remote_path"]: item for item in pool.get("cycles") or []}
-        for path in requested:
-            cycle = posixpath.basename(path)
-            if not SAFE_CYCLE.fullmatch(cycle) or posixpath.dirname(path) != root:
-                raise ValueError(f"拒绝清理非受管 GFS 周期目录：{path}")
-            quoted_path = shlex.quote(path)
-            cycle_lock = self._quote_remote(f"{root}/.pool-cycle-{cycle}.lock")
-            remove_cycle = shlex.quote(f"rm -rf -- {quoted_path}")
-            pattern = shlex.quote(f"[d]ownload_gfs_00z.sh {cycle}")
-            item = cycle_items.get(path) or {}
-            reason = (
-                "empty_residue" if item.get("empty_residue")
-                else "terminal_failure" if item.get("terminal_failure")
-                else "obsolete_cycle"
-            )
-            size_bytes = int(item.get("size_bytes") or 0) + int(item.get("partial_size_bytes") or 0)
-            forget = self._forget_queue_command("gfs", self.settings.hpc_gfs_download_script, root, cycle)
-            history = self._cleanup_history_command(
-                root, "gfs", cycle, size_bytes, reason,
-                str(item.get("failure_class") or ""), str(item.get("last_error") or ""),
-            )
-            log_path = self._quote_remote(f"{root}/logs/download_{cycle}.out")
-            commands.append(
-                f"if ! command -v flock >/dev/null 2>&1; then printf 'BLOCKED|%s\\n' {quoted_path}; "
-                f"elif pgrep -f {pattern} >/dev/null 2>&1; then "
-                f"printf 'BLOCKED|%s\\n' {quoted_path}; "
-                f"elif test -d {quoted_path}; then if flock -n {cycle_lock} -c {remove_cycle}; then {forget}; rm -f -- {log_path}; {history}; printf 'DELETED|%s\\n' {quoted_path}; else printf 'BLOCKED|%s\\n' {quoted_path}; fi; "
-                f"else {forget}; rm -f -- {log_path}; printf 'MISSING|%s\\n' {quoted_path}; fi"
-            )
-        output = self.run("; ".join(commands), timeout=120)
-        deleted: list[str] = []
-        missing: list[str] = []
-        blocked: list[str] = []
-        errors: list[str] = []
-        for line in output.splitlines():
-            state, separator, path = line.partition("|")
-            if not separator or path not in requested:
-                continue
-            if state == "DELETED":
-                deleted.append(path)
-            elif state == "MISSING":
-                missing.append(path)
-            elif state == "BLOCKED":
-                blocked.append(path)
-            elif state == "ERROR":
-                errors.append(path)
-        if blocked:
-            raise HpcError(f"周期下载进程仍在运行，未清理：{', '.join(blocked)}")
-        if errors:
-            raise HpcError(f"周期目录删除失败，未清理：{', '.join(errors)}")
-        return {"deleted": deleted, "missing": missing}
+        return self.cleanup_forcing_cycles("gfs", paths, target_cycles, protected_cycles)
 
-    def analyze_geography(self, fingerprint: str, request: dict[str, Any]) -> dict[str, Any]:
-        """在超算运行/复用 geogrid，并用 ncdump+awk 汇总地形与下垫面。"""
-        if not SAFE_FINGERPRINT.fullmatch(fingerprint):
-            raise ValueError("非法地理分析指纹")
-        domains = list(request.get("domains") or [])
-        if not domains:
-            raise ValueError("地理分析缺少嵌套域")
-        center = request["center"]
-        start = str(request.get("start_time") or "2020-01-01T00:00:00Z")
-        stamp = start[:13].replace("T", "_") + ":00:00"
-        repeat = lambda value: ", ".join(str(value) for _ in domains)
-        quoted_dates = repeat(f"'{stamp}'")
-        parent_ids = ", ".join(str(1 if index == 0 else int(item.get("parent_id", index))) for index, item in enumerate(domains))
-        ratios = ", ".join(str(int(item.get("parent_grid_ratio", 1))) for item in domains)
-        i_starts = ", ".join(str(int(item.get("i_parent_start", 1))) for item in domains)
-        j_starts = ", ".join(str(int(item.get("j_parent_start", 1))) for item in domains)
-        e_we = ", ".join(str(int(item["e_we"])) for item in domains)
-        e_sn = ", ".join(str(int(item["e_sn"])) for item in domains)
-        namelist = f"""&share
- wrf_core='ARW', max_dom={len(domains)},
- start_date={quoted_dates}, end_date={quoted_dates}, interval_seconds=21600,
- io_form_geogrid=2, debug_level=0,
-/
-&geogrid
- parent_id={parent_ids}, parent_grid_ratio={ratios},
- i_parent_start={i_starts}, j_parent_start={j_starts},
- e_we={e_we}, e_sn={e_sn}, geog_data_res={repeat("'default'")},
- dx={int(domains[0]['dx'])}, dy={int(domains[0]['dy'])}, map_proj='lambert',
- ref_x={center.get('grid_x') or (int(domains[0]['e_we']) + 1) / 2}, ref_y={center.get('grid_y') or (int(domains[0]['e_sn']) + 1) / 2},
- ref_lat={float(center['lat'])}, ref_lon={float(center['lon'])},
- truelat1={float(center['lat'])}, truelat2={float(center['lat'])},
- pole_lat=90, pole_lon=0, stand_lon={float(center['lon'])},
- geog_data_path='{self.settings.hpc_geog_dir}', opt_geogrid_tbl_path='./geogrid/',
-/
-&ungrib
- out_format='WPS', prefix='FILE',
-/
-&metgrid
- fg_name='FILE', io_form_metgrid=2, opt_metgrid_tbl_path='./metgrid',
-/
-"""
-        remote_dir = f"{self.settings.hpc_remote_dir}/backend_wrf_geo/{fingerprint}"
-        self.run(f"mkdir -p {self._quote_remote(remote_dir)}", timeout=60)
-        self._upload_text_atomic(namelist, f"{remote_dir}/namelist.wps")
-        expected = " ".join(f"geo_em.d{index:02d}.nc" for index in range(1, len(domains) + 1))
-        module_setup = f". {self._quote_remote(self.settings.hpc_runtime_env)} || exit 21; "
-        command = (
-            f"cd {self._quote_remote(remote_dir)} || exit 1; {module_setup} "
-            f"ready=1; for f in {expected}; do test -s \"$f\" || ready=0; done; "
-            "if test \"$ready\" -ne 1; then "
-            f"test -d geogrid || cp -r {self._quote_remote(self.settings.hpc_wps_source_dir)}/geogrid ./geogrid; "
-            f"ln -sf {self._quote_remote(self.settings.hpc_wps_source_dir)}/geogrid.exe ./geogrid.exe; "
-            "./geogrid.exe > geogrid.log 2>&1 || { tail -40 geogrid.log; exit 22; }; fi; "
-            "for f in geo_em.d??.nc; do test -s \"$f\" || continue; dom=${f#geo_em.}; dom=${dom%.nc}; "
-            "ncdump -v HGT_M,LANDMASK,LU_INDEX \"$f\" 2>/dev/null | "
-            "awk -v dom=\"$dom\" '"
-            "/^[[:space:]]*HGT_M =/ {m=1} /^[[:space:]]*LANDMASK =/ {m=2} /^[[:space:]]*LU_INDEX =/ {m=3} "
-            "m {done=index($0,\";\")>0; gsub(/[=,;]/,\" \"); for(i=1;i<=NF;i++) if($i ~ /^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/) {v=$i+0; "
-            "if(m==1){n++;s+=v;ss+=v*v;if(n==1||v<mn)mn=v;if(n==1||v>mx)mx=v} "
-            "else if(m==2){ln++;ls+=v} else if(m==3){un++;if(v==13)us++}} if(done)m=0} "
-            "END {mean=n?s/n:0; variance=n?ss/n-mean*mean:0; if(variance<0)variance=0; "
-            "printf \"DOMAIN|%s|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f|%.6f\\n\",dom,mean,mx,sqrt(variance),mx-mn,ln?ls/ln:0,ln?1-ls/ln:0,un?us/un:0}' ; done"
-        )
-        output = self.run(command, timeout=1800)
-        summaries: list[dict[str, Any]] = []
-        for line in output.splitlines():
-            parts = line.split("|")
-            if len(parts) != 9 or parts[0] != "DOMAIN":
-                continue
-            summaries.append(
-                {
-                    "domain": parts[1],
-                    "terrain_mean_m": float(parts[2]),
-                    "terrain_max_m": float(parts[3]),
-                    "terrain_std_m": float(parts[4]),
-                    "terrain_range_m": float(parts[5]),
-                    "land_fraction": float(parts[6]),
-                    "water_fraction": float(parts[7]),
-                    "urban_fraction": float(parts[8]),
-                }
-            )
-        if len(summaries) != len(domains):
-            raise HpcError("geogrid 已运行，但地理统计解析不完整")
-        return {"fingerprint": fingerprint, "source": "hpc_wps_geogrid", "domains": summaries, "remote_cache": remote_dir}
 
-    def launch(self, task_id: str, data_source: str = "gfs") -> dict[str, Any]:
-        source = "ecmwf" if str(data_source or "gfs").lower() == "ec" else str(data_source or "gfs").lower()
-        if source not in {"gfs", "ecmwf"}:
-            raise ValueError("数据源必须是 gfs 或 ecmwf")
-        expected_index_var = "WRF_GFS_EXPECTED_INDEX" if source == "gfs" else "WRF_EC_EXPECTED_INDEX"
-        service_dir, task_dir = self.service_dir(), self.task_dir(task_id)
-        runtime = (
-            f"WORK_DIR={self.settings.hpc_remote_dir} "
-            f"WPS_SOURCE_DIR={self.settings.hpc_wps_source_dir} "
-            f"WRF_SOURCE_DIR={self.settings.hpc_wrf_source_dir} "
-            f"WRF_CPU_SOURCE_DIR={self.settings.hpc_wrf_source_dir} "
-            f"WRF_RUNTIME_ENV={self.settings.hpc_runtime_env} "
-            f"WRF_RUNTIME_MIN_FREE_GB={self.settings.hpc_runtime_min_free_gb} "
-            f"WRF_RUNTIME_PRE_WRF_MIN_FREE_GB={self.settings.hpc_runtime_pre_wrf_min_free_gb} "
-            f"WRF_CPU_MPI_PROCESSES={self.settings.hpc_cpu_mpi_processes} "
-            f"GEOG_DATA_PATH={self.settings.hpc_geog_dir} "
-            f"WRF_TASK_CONFIG={task_dir}/task.json "
-            f"WRF_TASK_ENV={task_dir}/task.env "
-            f"{expected_index_var}={task_dir}/forcing.expected.tsv "
-            f"WRF_FAILURE_FILE={task_dir}/failure.json "
-            f"WRF_NONINTERACTIVE=true "
-            f"WRF_GFS_DATA_ROOT={self.settings.hpc_gfs_dir} "
-            f"WRF_EC_CACHE_ROOT={self.settings.hpc_ec_dir} "
-            f"WRF_EC_GRIB_FILTER={service_dir}/ecmwf_to_wps.filter "
-            f"WRF_GFS_MOUNT={self.settings.hpc_gfs_mount} "
-        )
-        preflight = self.run(
-            f"cd {task_dir} || exit 1; {runtime}WRF_PREFLIGHT_ONLY=true "
-            f"bash {service_dir}/wrf_hpc_gfs.sh",
-            timeout=300,
-        )
-        runner = (
-            f"printf '%s\\n' $$ > {task_dir}/service.pid; "
-            f"{runtime}"
-            f"bash {service_dir}/wrf_hpc_gfs.sh; "
-            f"code=$?; printf '%s\\n' \"$code\" > {task_dir}/exit.code; exit \"$code\""
-        )
-        command = (
-            f"cd {task_dir} || exit 1; "
-            f"nohup setsid bash -c {shlex.quote(runner)} "
-            f"> {task_dir}/service.log 2>&1 < /dev/null & "
-            f"for attempt in 1 2 3 4 5 6 7 8 9 10; do "
-            f"test -s {task_dir}/service.pid && break; sleep 0.1; done; "
-            f"cat {task_dir}/service.pid"
-        )
-        pid = self.run(command).splitlines()[-1]
-        if not pid.isdigit():
-            raise HpcError("未获得远端 WRF 进程 ID")
-        return {
-            "remote_pid": int(pid),
-            "remote_task_dir": task_dir,
-            "remote_output_dir": self.remote_output_dir(task_id),
-            "preflight": preflight.strip(),
+    def launch(self, task_id: str, data_source: str = "gfs", *, attempt: str) -> dict[str, Any]:
+        from runtime_release import require_ready
+        request = {}
+        with sqlite3.connect(self.settings.database_path.as_uri() + "?mode=ro", uri=True) as db:
+            row = db.execute("SELECT request_json FROM wrf_tasks WHERE id=?", (task_id,)).fetchone()
+            if row: request = json.loads(row[0])
+        ready = require_ready(self, self._release_settings(task_id), force=True, request=request)
+        pinned = self._task_runtime(task_id)
+        if (ready.get("release_id") != pinned.get("release_id")
+                or ready.get("fingerprint") != pinned.get("release_fingerprint")):
+            raise HpcError("任务固定的运行发布版本不一致，拒绝启动")
+        if not re.fullmatch(r"[a-f0-9]{32}", attempt):
+            raise ValueError("Invalid ordinary launch identity")
+        source = self._normalize_forcing_source(data_source)
+        script_dir, task_dir = self.service_dir(task_id), self.task_dir(task_id)
+        release = posixpath.dirname(script_dir)
+        attempt_dir = f"{self.settings.hpc_workbench_data_root}/tasks/{task_id}/attempts/{attempt}"
+        values = {
+            "WORK_DIR": attempt_dir,
+            "WRF_ATTEMPT_DIR": attempt_dir,
+            "WPS_SOURCE_DIR": release + "/wps",
+            "WRF_SOURCE_DIR": release + "/wrf",
+            "WRF_CPU_SOURCE_DIR": release + "/wrf",
+            "WRF_RUNTIME_ENV": release + "/runtime.env",
+            "WRF_RUNTIME_MIN_FREE_GB": self.settings.hpc_runtime_min_free_gb,
+            "WRF_RUNTIME_PRE_WRF_MIN_FREE_GB": self.settings.hpc_runtime_pre_wrf_min_free_gb,
+            "WRF_CPU_MPI_PROCESSES": ready.get("resource_budget", {}).get("mpi_processes", self.settings.hpc_cpu_mpi_processes),
+            "GEOG_DATA_PATH": self.settings.hpc_geog_dir,
+            "WRF_TASK_CONFIG": task_dir + "/task.json",
+            "WRF_TASK_ENV": task_dir + "/task.env",
+            "WRF_GFS_EXPECTED_INDEX" if source == "gfs" else "WRF_EC_EXPECTED_INDEX": task_dir + "/forcing.expected.tsv",
+            "WRF_FAILURE_FILE": task_dir + "/failure.json",
+            "WRF_NONINTERACTIVE": "true",
+            "WRF_GFS_DATA_ROOT": self.settings.hpc_gfs_dir,
+            "WRF_EC_CACHE_ROOT": self.settings.hpc_ec_dir,
+            "WRF_EC_GRIB_FILTER": script_dir + "/ecmwf_to_wps.filter",
+            "WRF_GFS_MOUNT": self.settings.hpc_gfs_mount,
         }
+        runtime = " ".join(k + "=" + shlex.quote(str(v)) for k, v in values.items()) + " "
+        self.run("mkdir -p -- " + shlex.quote(attempt_dir), timeout=30)
+        preflight = self.run(runtime + "WRF_PREFLIGHT_ONLY=true bash " + shlex.quote(script_dir + "/wrf_hpc_gfs.sh"), timeout=300)
+        runner = runtime + "bash " + shlex.quote(script_dir + "/wrf_hpc_gfs.sh")
+        budget = ready.get('resource_budget') or {}
+        reservations = {
+            'WRF_COMPUTE_MAX_TASKS': self.settings.ordinary_max_concurrent,
+            'WRF_COMPUTE_CPU_BUDGET': budget.get('mpi_processes', self.settings.hpc_cpu_mpi_processes),
+            'WRF_COMPUTE_MEMORY_BUDGET': budget.get('memory_bytes', 2 * 1024**3),
+            'WRF_COMPUTE_CPU_HEADROOM': self.settings.compute_cpu_headroom,
+            'WRF_COMPUTE_MEMORY_HEADROOM': self.settings.compute_memory_headroom_bytes,
+        }
+        command = (" ".join(k+'='+shlex.quote(str(v)) for k,v in reservations.items()) + " "
+                   + "WRF_COMPUTE_RESOURCE_ROOT=" + shlex.quote(self.settings.hpc_workbench_data_root) + " "
+                   + shlex.quote(self.settings.hpc_runtime_python) + " -B "
+                   + shlex.quote(self.supervisor_script(task_id, verify=True)) + " launch "
+                   + shlex.quote(task_dir) + " " + attempt + " " + shlex.quote(runner))
+        state = json.loads(self.run(command, timeout=30))
+        if state.get('status') == 'waiting_resources' and state.get('started') is False and state.get('attempt') == attempt:
+            return {'resource_wait': True, 'resource_wait_reason': state.get('reason', '资源不足，等待调度')}
+        process = state.get("process") or {}
+        return {"remote_pid": process.get("pid"), "remote_process": process,
+                "remote_launch_status": state.get("status", "unknown"),
+                "launch_attempt": attempt, "remote_task_dir": task_dir,
+                "remote_output_dir": attempt_dir + "/wrf/run", "preflight": preflight.strip()}
+
+    def _managed_status(self, task_id: str, *, cancel=False, timeout=30):
+        runtime = self._task_runtime(task_id)
+        token = runtime.get("launch_attempt")
+        if not token:
+            return None
+        if not re.fullmatch(r"[a-f0-9]{32}", str(token)):
+            raise HpcError("Invalid persisted launch attempt")
+        script = self.supervisor_script(task_id)
+        command = " ".join(shlex.quote(v) for v in (
+            self.settings.hpc_runtime_python, "-B", script, "cancel" if cancel else "status",
+            self.task_dir(task_id), token))
+        state = json.loads(self.run(command, timeout=timeout))
+        state["runtime_profile"] = {"actual": "cpu", "requested": "cpu", "fallback_used": False}
+        if not cancel and state.get("attempt") == token:
+            # WPS output can push its phase marker out of the bounded runner
+            # log. Read only this persisted attempt's small phase journal.
+            self._assert_task_id(task_id)
+            journal = (f"{self.settings.hpc_workbench_data_root}/tasks/{task_id}/attempts/{token}/"
+                       f"stage_status_{task_id}_attempt-1-cpu.jsonl")
+            try:
+                tail = self.run("tail -c 4096 -- " + shlex.quote(journal)
+                                + " 2>/dev/null || true", timeout=min(timeout, 10))
+                for line in reversed(tail.splitlines()):
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if (isinstance(record, dict)
+                            and record.get("stage") in {"prepare", "data", "workspace", "wps", "wrf", "done", "failed"}
+                            and record.get("status") in {"running", "done", "error"}):
+                        marker = {"stage": record["stage"], "status": record["status"]}
+                        state["log"] = str(state.get("log") or "") + "\n[stage-status] " + json.dumps(marker)
+                        break
+            except HpcError:
+                # A missing optional phase observation is not a new process
+                # identity or permission to replay a launch.
+                pass
+        return state
+
+    def terminal_evidence(self, task: dict[str, Any]) -> dict[str, Any]:
+        from terminal_evidence import verify_waiting_restart
+        return verify_waiting_restart(self.settings, self, task)
+
+    def diagnostic_status(self, task_id: str) -> dict[str, Any]:
+        """One bounded, read-only observation; never deploys or starts a task."""
+        managed = self._managed_status(task_id, timeout=12)
+        if managed is not None:
+            return {"status": managed.get("status", "unknown"),
+                    "log": str(managed.get("log") or "")[-24000:]}
+        task_dir = self.task_dir(task_id)
+        command = (
+            f"if test -f {task_dir}/exit.code; then printf 'EXIT:'; cat {task_dir}/exit.code; "
+            f"elif test -f {task_dir}/service.pid && kill -0 $(cat {task_dir}/service.pid) 2>/dev/null; then printf RUNNING; "
+            f"elif test -f {task_dir}/service.pid; then printf LOST; else printf MISSING; fi; "
+            "printf '\\n__WRF_DIAGNOSTIC_LOG__\\n'; "
+            f"tail -c 24000 {task_dir}/service.log 2>/dev/null || true"
+        )
+        result = self.run(command, timeout=12)
+        state, _, log = result.partition("\n__WRF_DIAGNOSTIC_LOG__\n")
+        state = state.strip()
+        status = "succeeded" if state == "EXIT:0" else "failed" if state.startswith("EXIT:") else state.lower()
+        return {"status": status if status in {"succeeded", "failed", "running", "lost", "missing"} else "unknown",
+                "log": log[-24000:]}
 
     def status(self, task_id: str) -> dict[str, Any]:
+        managed = self._managed_status(task_id)
+        if managed is not None:
+            return managed
         task_dir = self.task_dir(task_id)
         command = (
             f"if test -f {task_dir}/exit.code; then printf 'EXIT:'; cat {task_dir}/exit.code; "
@@ -2970,6 +2893,14 @@ class HpcClient:
         )
         state = self.run(command).strip()
         log = self.run(f"tail -n 80 {task_dir}/service.log 2>/dev/null || true", timeout=60)
+        # Inspect every rank's bounded log tail, not only rank zero. Paths are
+        # derived from the validated task id and never from model output.
+        rank_dirs = [path for path in self.task_artifact_paths(task_id)
+                     if posixpath.basename(path).startswith(f"WRF_{task_id}")]
+        if rank_dirs:
+            rank_log = self.run("find " + " ".join(self._quote_remote(path) for path in rank_dirs)
+                                + " -maxdepth 3 -type f -name 'rsl.*' -exec tail -n 16 {} + 2>/dev/null | tail -c 24000", timeout=60)
+            log = log + "\n" + rank_log
         profile_raw = self.run(f"cat {task_dir}/runtime_profile.json 2>/dev/null || true", timeout=60)
         profile: dict[str, Any] = {}
         try:
@@ -3012,6 +2943,12 @@ class HpcClient:
             raise HpcError("远端进程状态不明，不能自动清理")
         if remote_status == "missing" and not allow_missing:
             raise HpcError("远端任务记录缺失，不能确认清理安全性")
+        if remote_status not in {"failed", "cancelled"} and not (allow_missing and remote_status == "missing"):
+            raise HpcError("远端尝试终态未确认，禁止清理")
+        if self._task_runtime(task_id).get("release_id"):
+            # Immutable attempts remain available for diagnosis. A new launch
+            # uses a new attempt directory; it never removes the prior one.
+            return {"status": remote_status, "deleted_paths": [], "retained": True}
         paths = self.task_artifact_paths(task_id)
         quoted = " ".join(self._quote_remote(path) for path in paths)
         self.run(f"rm -rf -- {quoted}", timeout=300)
@@ -3033,6 +2970,26 @@ class HpcClient:
 
     def validate_outputs(self, task_id: str) -> dict[str, Any]:
         """下载前在超算端确认 wrfout 已稳定且能由 NetCDF/HDF5 打开。"""
+        runtime = self._task_runtime(task_id)
+        if runtime.get("output_validation_override") is not None:
+            # An offline operator transaction may upgrade only postprocessing.
+            # Verify every binding again; never change the compute release or
+            # silently fall back to a stale validator after an invalid override.
+            from output_validation_recovery import load_bound_task, validate_bound_outputs
+            task = load_bound_task(self.settings.database_path, task_id,
+                config_path=self.settings.run_dir / task_id / "task.config.json")
+            return validate_bound_outputs(self, self.settings, task)
+        if runtime.get("release_id"):
+            script_dir = self.service_dir(task_id)
+            release = posixpath.dirname(script_dir)
+            command = (". " + shlex.quote(release + "/runtime.env") + " >/dev/null 2>&1 && "
+                       + " ".join(shlex.quote(v) for v in (self.settings.hpc_runtime_python, "-B",
+                           script_dir + "/validate_outputs.py", self.remote_output_dir(task_id),
+                           self.task_dir(task_id) + "/task.json")))
+            result = json.loads(self.run(command, timeout=900))
+            if result.get("schema") != "wrf-output-validation-1":
+                raise HpcError("输出校验器合同无效")
+            return result
         remote_dir = self.remote_output_dir(task_id)
         command = (
             f"cd {self._quote_remote(remote_dir)} || exit 1; "
@@ -3042,6 +2999,7 @@ class HpcClient:
             f"ncdump_path=$(. {self._quote_remote(self.settings.hpc_runtime_env)} "
             ">/dev/null 2>&1; command -v ncdump 2>/dev/null || true); "
             "test -n \"$ncdump_path\" || ncdump_path=$(command -v ncdump 2>/dev/null || true); "
+            "test -n \"$ncdump_path\" || { printf 'MISSING_NETCDF_VALIDATOR'; exit 7; }; "
             "inventory=$(find . -maxdepth 1 -type f -name 'wrfout_d*_*' -printf '%f|%s\\n' | sort); "
             "sleep 2; "
             "printf '%s\\n' \"$inventory\" | "
@@ -3074,10 +3032,10 @@ class HpcClient:
         return {"valid": valid, "invalid": invalid, "complete": not invalid}
 
     def cancel(self, task_id: str) -> dict[str, Any]:
-        task_dir = self.task_dir(task_id)
-        command = (
-            f"pid=$(cat {task_dir}/service.pid 2>/dev/null || true); "
-            f"case \"$pid\" in ''|*[!0-9]*) printf UNCONFIRMED;; *) "
-            f"if kill -0 \"$pid\" 2>/dev/null; then kill -TERM -- -\"$pid\" && printf TERM_SENT; else printf NOT_RUNNING; fi;; esac"
-        )
-        return {"status": self.run(command).strip().lower()}
+        managed = self._managed_status(task_id, cancel=True)
+        if managed is not None:
+            return managed
+        state = self.status(task_id)
+        if state.get("status") in {"succeeded", "failed", "cancelled"}:
+            return state
+        raise HpcError("旧任务缺少受管进程身份，拒绝按 PID 文件发送信号")
