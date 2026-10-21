@@ -21,6 +21,8 @@ import tempfile
 import time
 import shutil
 import stat
+import socket
+from urllib.parse import urlsplit
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -476,11 +478,188 @@ class PoolQueue:
             item.update({"publication": status, "publish_retry_at": retry_at, "publication_error": error, "updated_at": utc_now()})
             self.save_state(state)
 
+    @staticmethod
+    def attempt_cause(code, status, error, elapsed, budget):
+        text = str(error or '').lower()
+        if status == 429:
+            return 'rate_limited'
+        if code == 28:
+            if 'operation too slow' in text or 'less than' in text and 'bytes/sec' in text:
+                return 'low_speed_timeout'
+            if elapsed >= budget - 1:
+                return 'total_timeout'
+            if status == 0:
+                return 'connection_failure'
+            return 'timeout_unknown'
+        if code in {5, 6, 7, 35, 51, 60}:
+            return 'connection_failure'
+        if code == 0 and status < 400:
+            return ''
+        if status >= 500:
+            return 'upstream_temporary'
+        if status >= 400:
+            return 'upstream_http_error'
+        return 'transfer_failure'
+
+    def history_file(self, cycle, write=False):
+        cycle = safe_cycle(cycle)
+        directory = self.root / '.pool-attempts'
+        if write:
+            directory.mkdir(mode=0o700, exist_ok=True)
+        if not directory.exists():
+            return None
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError('unsafe attempt history directory')
+        directory_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(cycle + '.jsonl', (os.O_RDWR | os.O_APPEND | os.O_CREAT if write else os.O_RDONLY) | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        finally:
+            os.close(directory_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            os.close(fd)
+            raise ValueError('unsafe attempt history file')
+        return fd
+
+    def record_attempt(self, cycle, value):
+        fd = self.history_file(cycle, write=True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            # Isolate a torn last record after a crash; never rewrite old evidence.
+            if os.fstat(fd).st_size:
+                if os.pread(fd, 1, os.fstat(fd).st_size-1) != b'\n':
+                    os.write(fd, b'\n')
+            data = (json.dumps(value, sort_keys=True) + '\n').encode()
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError('attempt history write failed')
+                data = data[written:]
+            os.fsync(fd)
+        except OSError as exc:
+            raise RuntimeError('attempt history could not be persisted; inspect before retry') from exc
+        finally:
+            os.close(fd)
+
+    def attempt_history(self, cycle, before=None, limit=30):
+        """Bound memory, retain every record; cursor is the parent start offset."""
+        if before is not None and (type(before) is not int or before < 0):
+            raise ValueError('invalid history cursor')
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('invalid history limit')
+        fd = self.history_file(cycle)
+        if fd is None:
+            return {'items': [], 'next_cursor': None, 'legacy_unrecorded': True}
+        from collections import OrderedDict
+        rows = OrderedDict()
+        damaged = 0
+        with os.fdopen(fd, 'rb') as stream:
+            end = os.fstat(stream.fileno()).st_size
+            while stream.tell() < end:
+                offset = stream.tell()
+                line = stream.readline(min(16384, end-offset))
+                if not line.endswith(b'\n'):
+                    damaged += 1
+                    continue
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    damaged += 1
+                    continue
+                key = event.get('id')
+                if event.get('event') == 'start' and (before is None or offset < before):
+                    rows[key] = {k:v for k,v in event.items() if k not in {'event','owner'}}
+                    rows[key].update(status='unfinished', offset=offset, requests=[])
+                    while len(rows) > limit+1:
+                        rows.popitem(last=False)
+                elif key in rows:
+                    if event.get('event') == 'finish':
+                        rows[key].update({k:v for k,v in event.items() if k not in {'event'}})
+                    elif event.get('event') in {'request_start','request_finish'}:
+                        requests = rows[key]['requests']
+                        value = {k:v for k,v in event.items() if k not in {'event','id'}}
+                        prior = next((r for r in requests if r['request'] == value['request']), None)
+                        if prior is None:
+                            requests.append(value)
+                        else:
+                            prior.update(value)
+        items = list(rows.values())[-limit:][::-1]
+        return {'items':items, 'next_cursor':items[-1]['offset'] if len(rows)>limit else None,
+                'legacy_unrecorded':False, 'damaged_records':damaged}
+
+    def invoke_curl(self, command, **kwargs):
+        context = getattr(self, '_attempt_context', None)
+        if context is None:
+            return subprocess.run(command, **kwargs)
+        context['request'] += 1
+        output = Path(command[command.index('--output')+1])
+        before = output.stat().st_size if output.exists() else 0
+        start = time.monotonic()
+        budget = float(command[command.index('--max-time')+1])
+        record = {'id':context['id'], 'request':context['request'], 'event':'request_start',
+                  'started_at':utc_now(), 'bytes_before':before, 'budget_seconds':budget}
+        self.record_attempt(context['cycle'], record)
+        try:
+            result = subprocess.run(command, **kwargs)
+        except OSError:
+            elapsed = time.monotonic()-start
+            self.record_attempt(context['cycle'], dict(record, event='request_finish', finished_at=utc_now(),
+                execution_seconds=elapsed, cause='command_failure', status='failed', curl_code=None))
+            raise
+        elapsed = time.monotonic()-start
+        headers = Path(str(output)+'.headers')
+        status = self._http_status(headers)
+        error = result.stderr or ''
+        after = output.stat().st_size if output.exists() else 0
+        self.record_attempt(context['cycle'], dict(record, event='request_finish', finished_at=utc_now(),
+            execution_seconds=elapsed, bytes_after=after, http_status=status, curl_code=result.returncode,
+            cause=self.attempt_cause(result.returncode,status,error,elapsed,budget),
+            status='succeeded' if result.returncode==0 else 'failed'))
+        return result
+
+    def run_curl(self, command, **kwargs):
+        """Retry only zero-progress NOMADS connection failures via fresh DNS peers."""
+        deadline = time.monotonic() + float(command[command.index("--max-time") + 1])
+        output = Path(command[command.index("--output") + 1])
+        before = output.stat().st_size if output.exists() else 0
+        result = self.invoke_curl(command, **kwargs)
+        url = urlsplit(command[-1])
+        if (self.source != "gfs" or url.scheme != "https"
+                or url.hostname != "nomads.ncep.noaa.gov"
+                or result.returncode not in {7, 28, 35}
+                or (output.stat().st_size if output.exists() else 0) != before):
+            return result
+        try:
+            peers = sorted({item[4][0] for item in socket.getaddrinfo(
+                url.hostname, 443, socket.AF_INET, socket.SOCK_STREAM)})[:2]
+        except OSError:
+            return result
+        for peer in peers:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                break
+            retry = list(command)
+            retry[retry.index("--max-time") + 1] = str(max(1, int(remaining)))
+            retry[retry.index("--connect-timeout") + 1] = str(min(
+                float(command[command.index("--connect-timeout") + 1]), max(1, int(remaining))))
+            # Preserve HTTPS hostname/SNI/certificate checks and the original
+            # Range/continuation destination; never use a mirror or literal-IP URL.
+            retry[-1:-1] = ["--resolve", url.hostname + ":443:" + peer]
+            result = self.invoke_curl(retry, **kwargs)
+            if (result.returncode not in {7, 28, 35}
+                    or (output.stat().st_size if output.exists() else 0) != before):
+                break
+        return result
+
     def probe_published(self, cycle: str) -> bool:
         """Probe f072 before spending bandwidth on low-priority bulk prefetch."""
         probe = self.root / f".publish-probe-{cycle}.part"
         command = ["curl", "--fail", "--location", "--range", "0-16383", "--connect-timeout", "20", "--max-time", "45", "--silent", "--show-error", "--output", str(probe), self.url(cycle, 72)]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
+        result = self.run_curl(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
         try:
             available = result.returncode == 0 and probe.read_bytes().startswith(b"GRIB")
         except OSError:
@@ -547,7 +726,12 @@ class PoolQueue:
             self.save_state(state)
         if choices:
             choices.sort()
-            _priority, _cycle_order, cycle, hour = choices[0]
+            priority, _cycle_order, cycle, hour = choices[0]
+            # An older bulk fill must not starve a due publication check for
+            # the new target. Task-priority files still take precedence, and
+            # the probe's existing retry deadline bounds repeated checks.
+            if priority and probe_cycle:
+                return probe_cycle, -1
             return cycle, hour
         return (probe_cycle, -1) if probe_cycle else None
 
@@ -626,17 +810,25 @@ class PoolQueue:
             state = self.load_state()
             entry = state["cycles"][cycle]["files"][f"{hour:03d}"]
             attempts = int(entry.get("attempts") or 0) + 1
+            attempt_id = uuid.uuid4().hex
+            started_at, started_clock = utc_now(), time.monotonic()
+            self.record_attempt(cycle, {'event':'start','id':attempt_id,'file':self.file_name(hour),
+                'attempt':attempts,'started_at':started_at,'bytes_before':before,
+                'min_speed_bps':self.args.min_speed,'low_speed_seconds':120,'budget_seconds':3600})
             entry.update({"status": "downloading", "attempts": attempts, "bytes": before, "current_file": self.file_name(hour), "retry_at": 0, "error": None, "updated_at": utc_now()})
             state["cycles"][cycle]["active_file"] = self.file_name(hour)
             state["cycles"][cycle]["updated_at"] = utc_now()
             self.save_state(state)
         command = ["curl", "--fail", "--location", "--continue-at", "-", "--connect-timeout", "30", "--max-time", "3600", "--speed-time", "120", "--speed-limit", str(self.args.min_speed), "--dump-header", str(headers), "--output", str(part), "--write-out", "%{speed_download}", self.url(cycle, hour)]
         command_error = ""
+        self._attempt_context = {'id':attempt_id, 'cycle':cycle, 'request':0}
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
+            result = self.run_curl(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
         except OSError as exc:
             result = None
             command_error = f"download command failed: {exc}"
+        finally:
+            self._attempt_context = None
         speed = int(float(result.stdout.strip() or 0)) if result is not None and result.stdout.strip().replace(".", "", 1).isdigit() else 0
         if result is not None and result.returncode == 0 and self.valid(part):
             os.replace(part, output)
@@ -644,6 +836,9 @@ class PoolQueue:
                 headers.unlink()
             except FileNotFoundError:
                 pass
+            self.record_attempt(cycle, {'event':'finish','id':attempt_id,'status':'succeeded',
+                'finished_at':utc_now(),'execution_seconds':time.monotonic()-started_clock,
+                'bytes_after':output.stat().st_size,'cause':''})
             self._set_entry(cycle, hour, {"status": "ready", "bytes": output.stat().st_size, "sha256": self.digest(output), "download_rate_bps": speed, "retry_at": 0, "no_progress_attempts": 0, "error": None, "failure_class": "", "failed_at": 0, "retryable": False, "terminal_retry_at": 0})
             return
         after = part.stat().st_size if part.exists() else 0
@@ -683,6 +878,16 @@ class PoolQueue:
                 })
             else:
                 values.update({"status": "rate_limited" if status == 429 else "queued", "retry_at": epoch_now() + self._retry_after(headers, attempts, self.args.retry_max_seconds)})
+            cause = self.attempt_cause(result.returncode if result is not None else None,
+                status, error, time.monotonic()-started_clock, 3600)
+            if command_error:
+                cause = 'command_failure'
+            elif result is not None and result.returncode == 0:
+                cause = 'data_integrity'
+            self.record_attempt(cycle, {'event':'finish','id':attempt_id,'status':'failed',
+                'finished_at':utc_now(),'execution_seconds':time.monotonic()-started_clock,
+                'bytes_after':after,'cause':cause,'curl_code':result.returncode if result is not None else None,
+                'http_status':status,'next_retry_at':values.get('retry_at') or values.get('terminal_retry_at') or 0})
             entry.update(values)
             state["cycles"][cycle]["active_file"] = None
             state["cycles"][cycle]["updated_at"] = utc_now()

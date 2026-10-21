@@ -43,6 +43,8 @@ class PlanningAssessRequest(BaseModel):
     physics: dict[str, Any] | None = None
     assimilation_scheme: Literal["off", "fdda_weak", "fdda_standard", "fdda_strong"] | None = None
     projection: dict[str, Any] = Field(default_factory=dict)
+    namelist: dict[str, Any] | None = None
+    time_step_seconds: int | None = Field(default=None, ge=1)
 
 
 def assess(payload: PlanningAssessRequest, health: dict[str, Any], pool=None) -> dict[str, Any]:
@@ -160,8 +162,10 @@ def assess(payload: PlanningAssessRequest, health: dict[str, Any], pool=None) ->
             except FileNotFoundError:
                 literature = {"status": "knowledge_unavailable", "candidates": [],
                               "reason": "离线 WRF 知识库尚未导入；不生成虚构文献候选。"}
+    request = payload.model_dump(mode="json", exclude_none=True)
     return {
-        **recommendations(payload.model_dump(mode="json", exclude_none=True), health, pool),
+        **recommendations(request, health, pool),
+        "guidance": {"schema": "wrf-guidance-1", "items": [], "retired": True},
         "capability_version": "wrf-ordinary-3",
         "assessed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "missing_fields": missing,

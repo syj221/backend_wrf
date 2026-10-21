@@ -20,6 +20,14 @@ def _check_buffer(buffer_hours: int) -> None:
         raise ValueError("边界缓冲须为非负整数小时")
 
 
+def normalize_source(data_source: str) -> str:
+    source = str(data_source or "gfs").strip().lower()
+    if source == "ec":
+        source = "ecmwf"
+    if source not in {"gfs", "ecmwf"}:
+        raise ValueError("数据源必须是 gfs 或 ecmwf")
+    return source
+
 class GfsManager:
     """负责 GFS/ECMWF 的统一周期与时次计算；GRIB 文件由 tx-lab 数据池管理。"""
 
@@ -30,14 +38,7 @@ class GfsManager:
     def cycle_key(value: datetime) -> str:
         return value.astimezone(timezone.utc).strftime("%Y%m%d%H")
 
-    @staticmethod
-    def normalize_source(data_source: str) -> str:
-        source = str(data_source or "gfs").strip().lower()
-        if source == "ec":
-            source = "ecmwf"
-        if source not in {"gfs", "ecmwf"}:
-            raise ValueError("数据源必须是 gfs 或 ecmwf")
-        return source
+    normalize_source = staticmethod(normalize_source)
 
     def latest_cycles(
         self,

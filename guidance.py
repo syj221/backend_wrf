@@ -91,20 +91,46 @@ def recommendations(request, health, pool=None, now=None):
     first = math.floor((model_start - cycle_time).total_seconds() / (interval * 3600)) * interval
     forcing_buffer = boundary_buffer_hours(request.get("configuration_profile"))
     last = math.ceil(((end - cycle_time).total_seconds() / 3600 + forcing_buffer) / interval) * interval
-    coverage = "unknown"
-    required_hours = list(range(first, last + 1, interval))
-    missing_hours = None
-    if first < 0 or last > 72 or end <= start:
-        coverage = "unavailable"
-    elif pool is not None:
-        cycles = [c for item in pool.get("pool_items", []) if item.get("provider") == source for c in item.get("cycles", [])]
-        match = next((c for c in cycles if c.get("cycle") == cycle), None)
+    nominal_cycle = cycle
+    cycles = [c for item in (pool or {}).get("pool_items", [])
+              if item.get("provider") == source for c in item.get("cycles", [])]
+
+    def bounds_for_cycle(key):
+        # Mirror the executor's complete-cycle fallback without reserving or downloading files.
+        try:
+            stamp = datetime.strptime(key, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+        low = math.floor((model_start - stamp).total_seconds() / (interval * 3600)) * interval
+        high = math.ceil(((end - stamp).total_seconds() / 3600 + forcing_buffer) / interval) * interval
+        if low < 0 or high > 72 or end <= start:
+            return None
+        return low, high, list(range(low, high + 1, interval))
+
+    def observation(key):
+        bounds = bounds_for_cycle(key)
+        if bounds is None:
+            return {"cycle": key, "status": "unavailable", "missing_hours": None}
+        match = next((c for c in cycles if c.get("cycle") == key), None)
+        missing = None
+        status = "unknown"
         if match:
             available = match.get("available_hours")
-            missing_hours = [hour for hour in required_hours if hour not in available] if isinstance(available, list) else None
-            coverage = "ready" if missing_hours == [] or (missing_hours is None and match.get("complete")) else "waiting_publish" if match.get("status") == "waiting_publish" else "needs_download"
-        elif pool.get("status") != "unavailable":
-            coverage = "needs_download"
+            missing = [h for h in bounds[2] if h not in available] if isinstance(available, list) else None
+            status = "ready" if missing == [] or (missing is None and match.get("complete")) else "waiting_publish" if match.get("status") == "waiting_publish" else "needs_download"
+        elif pool is not None and pool.get("status") != "unavailable":
+            status = "needs_download"
+        return {"cycle": key, "status": status, "required_hours": list(bounds[:2]), "missing_hours": missing}
+
+    nominal = observation(nominal_cycle)
+    # Partial old cycles are not execution fallbacks even when a short subwindow is cached.
+    for key in sorted({str(c.get("cycle") or "") for c in cycles if c.get("complete")}, reverse=True):
+        if bounds_for_cycle(key) is not None and observation(key)["status"] == "ready":
+            cycle = key
+            first, last, _ = bounds_for_cycle(key)
+            break
+    selected = observation(cycle)
+    coverage, missing_hours = selected["status"], selected["missing_hours"]
     iso = lambda value: value.isoformat().replace("+00:00", "Z")
     advice = {
         "time": {"value": [iso(start), iso(end)], "reason": f"优先保留用户时段或明确的 {duration} 小时需求；仅未指定时默认 24 小时。所选 {spinup_hours} 小时 spin-up 不计入用户预报时长。", "durations_hours": sorted({duration, 6, 12, 24, 48})},
@@ -126,7 +152,13 @@ def recommendations(request, health, pool=None, now=None):
                 continue
             candidates.append({"value": {"start_time": iso(candidate_start), "end_time": iso(candidate_end)},
                 "data_window": window, "duration_hours": duration,
-                "reason": "按当前服务时间与资料步长对齐；覆盖状态为" + window["status"] + "，spin-up另计。"})
+                "reason": (
+                    "按当前服务时间与资料步长对齐；"
+                    + ("可复用已下载的 " if window["status"] == "ready" else "名义周期 ")
+                    + source.upper() + " " + window["cycle"] + "，"
+                    + {"ready": "所需时次已就绪", "needs_download": "所需时次待下载", "waiting_publish": "等待上游发布", "unknown": "资料状态尚未核验"}.get(window["status"], window["status"])
+                    + ("；最新周期 " + window["nominal_cycle"]["cycle"] + "：" + {"ready":"已就绪", "needs_download":"待下载", "waiting_publish":"等待发布", "unknown":"未核验"}.get(window["nominal_cycle"]["status"], window["nominal_cycle"]["status"]) if window["cycle"] != window["nominal_cycle"]["cycle"] else "")
+                    + "。spin-up另计；实际运行前重新核验资料并按现有策略选周期。")})
         advice["time"]["candidates"] = candidates
     domains = request.get("domains") or []
     cells = sum(d.get("e_we", 0) * d.get("e_sn", 0) for d in domains)
@@ -161,7 +193,7 @@ def recommendations(request, health, pool=None, now=None):
     weighted_cells = sum(d.get("e_we",0)*d.get("e_sn",0)*factor for d,factor in zip(domains,factors)) if all(f is not None for f in factors) else None
     complete = all(request.get(key) for key in ("start_time", "end_time", "center", "domains"))
     return {"suggestions": advice, "choice_constraints": constraints, "ruleset": RULESET, "rules": configuration_rules(request, complete=complete),
-            "data_window": {"source": source, "cycle": cycle, "required_hours": [first, last], "boundary_buffer_hours": forcing_buffer, "missing_hours": missing_hours, "status": coverage, "sampled_at": pool.get("sampled_at") if pool else None},
+            "data_window": {"source": source, "cycle": cycle, "required_hours": [first, last], "boundary_buffer_hours": forcing_buffer, "nominal_cycle": nominal, "selection_policy": "newest_complete_covering_else_nominal", "missing_hours": missing_hours, "status": coverage, "sampled_at": pool.get("sampled_at") if pool else None},
             "resources": {"status": health.get("status", "unknown"), "sampled_at": health.get("sampled_at"),
                           "runtime_free_gb": health.get("runtime_free_gb"), "grid_cells": cells,
                           "queue_size": health.get("queue_size"), "active_task_count": health.get("active_task_count"),

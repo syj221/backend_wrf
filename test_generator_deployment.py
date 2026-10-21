@@ -11,9 +11,9 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from scripts.deploy_namelist_generator import FILES, REMOTE, ordinary_idle
+from scripts.deploy_namelist_generator import FILES, REMOTE, ordinary_idle, deploy
 
 
 class GeneratorDeploymentTest(unittest.TestCase):
@@ -101,6 +101,14 @@ exec(%r)
             if self.old[name] is not None:
                 self.assertEqual(hashlib.sha256((self.root/name).read_bytes()).hexdigest(), self.old[name])
         self.assertEqual(json.loads((self.stage/'deployment.json').read_text())['status'], 'rolled_back')
+
+    def test_immutable_release_refuses_in_place_apply_before_any_io(self):
+        client = Mock()
+        with patch('scripts.deploy_namelist_generator.ordinary_idle') as idle:
+            with self.assertRaisesRegex(RuntimeError, 'deploy_runtime_release.py'):
+                deploy(client, SimpleNamespace(hpc_runtime_release='ordinary-frozen'), apply=True)
+            idle.assert_not_called()
+        self.assertEqual(client.mock_calls, [])
 
     def test_unknown_or_queued_ordinary_task_prevents_network_and_deploy(self):
         path = Path(self.tmp.name)/'synthetic.sqlite3'

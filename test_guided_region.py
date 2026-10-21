@@ -41,3 +41,41 @@ class GuidedRegionTest(unittest.TestCase):
             self.assertGreaterEqual(start,now)
             self.assertEqual((end-start).total_seconds(),6*3600)
         self.assertNotIn('candidates',recommendations({**request,**options[1]['value']},{},now=now)['suggestions']['time'])
+
+    def test_future_windows_reuse_downloaded_cycle_without_changing_formal_duration(self):
+        now = datetime(2026, 10, 20, 7, 7, tzinfo=timezone.utc)
+        request = {'duration_hours':12, 'spinup':{'mode':'custom','hours':6},
+                   'configuration_profile':'wrf-ordinary-ui-2'}
+        pool = {'pool_items':[{'provider':'gfs','cycles':[
+            {'cycle':'2026102000','complete':False,'available_hours':[0,1], 'status':'waiting_publish'},
+            {'cycle':'2026101900','complete':True,'available_hours':list(range(73))},
+            {'cycle':'2026101800','complete':True,'available_hours':list(range(73))}]}]}
+        options = recommendations(request, {}, pool, now)['suggestions']['time']['candidates']
+        self.assertEqual(len(options), 3)
+        for option in options:
+            self.assertEqual(option['data_window']['cycle'], '2026101900')
+            self.assertEqual(option['data_window']['status'], 'ready')
+            self.assertEqual(option['data_window']['nominal_cycle']['status'], 'waiting_publish')
+            self.assertIn('已下载', option['reason'])
+            self.assertIn('2026101900', option['reason'])
+            start = datetime.fromisoformat(option['value']['start_time'])
+            end = datetime.fromisoformat(option['value']['end_time'])
+            self.assertGreaterEqual(start, now)
+            self.assertEqual((end-start).total_seconds(), 12*3600)
+        pool['pool_items'][0]['cycles'][1]['complete'] = False
+        pool['pool_items'][0]['cycles'][2]['cycle'] = '2026101600'
+        option = recommendations(request, {}, pool, now)['suggestions']['time']['candidates'][0]
+        self.assertEqual(option['data_window']['cycle'], '2026102000')
+        self.assertEqual(option['data_window']['status'], 'waiting_publish')
+
+    def test_cycle_fallback_includes_spinup_and_is_source_specific(self):
+        now = datetime(2026,10,20,7,7,tzinfo=timezone.utc)
+        pool = {'pool_items':[{'provider':'gfs','cycles':[{'cycle':'2026101900','complete':True}]}]}
+        request = {'data_source':'ecmwf', 'duration_hours':12, 'spinup':{'mode':'custom','hours':6}}
+        self.assertNotEqual(recommendations(request, {}, pool, now)['data_window']['status'], 'ready')
+        pool['pool_items'][0]['provider'] = 'ecmwf'
+        candidate = recommendations(request, {}, pool, now)['suggestions']['time']['candidates'][0]
+        self.assertEqual(candidate['data_window']['cycle'], '2026101900')
+        self.assertEqual(candidate['data_window']['required_hours'], [27,51])
+        pool['pool_items'][0]['cycles'][0]['available_hours'] = [0,3]
+        self.assertNotEqual(recommendations(request, {}, pool, now)['data_window']['status'], 'ready')

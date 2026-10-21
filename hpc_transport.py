@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from config import Settings
+from gfs import normalize_source
 
 
 SAFE_TASK_ID = re.compile(r"^(?:wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}|wrf_agent_[0-9a-f]{32})$")
@@ -1650,14 +1651,7 @@ class HpcClient:
             raise HpcError(f"{source} {cycle} 驱动资料等待已达总时限；保留断点和任务输入，共享下载不被终止，请重新核验资料后申请恢复")
         return remaining
 
-    @staticmethod
-    def _normalize_forcing_source(data_source: str) -> str:
-        source = str(data_source or "gfs").strip().lower()
-        if source == "ec":
-            source = "ecmwf"
-        if source not in {"gfs", "ecmwf"}:
-            raise ValueError("数据源必须是 gfs 或 ecmwf")
-        return source
+    _normalize_forcing_source = staticmethod(normalize_source)
 
     def _forcing_settings(self, data_source: str) -> dict[str, Any]:
         source = self._normalize_forcing_source(data_source)
@@ -1698,6 +1692,37 @@ class HpcClient:
             "hours": tuple(range(0, 73, 3)),
             "total_files": 25,
         }
+
+    def forcing_attempt_history(self, source, cycle, before=None, limit=20):
+        source = self._normalize_forcing_source(source)
+        if not isinstance(cycle, str) or not SAFE_CYCLE.fullmatch(cycle):
+            raise ValueError('Invalid forcing cycle')
+        if type(limit) is not int or not 1 <= limit <= 100 or (before is not None and (type(before) is not int or before < 0)):
+            raise ValueError('Invalid attempt history page')
+        root = self._forcing_settings(source)['root']
+        module = self.service_dir() + '/forcing_pool_queue.py'
+        program = """import importlib.util,json,argparse
+spec=importlib.util.spec_from_file_location('history_queue',MODULE);q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
+if not hasattr(q.PoolQueue,'attempt_history'):
+ print(json.dumps({'items':[],'next_cursor':None,'legacy_unrecorded':True,'supported':False}))
+else:
+ pool=q.PoolQueue(argparse.Namespace(source=SOURCE,root=ROOT))
+ print(json.dumps(dict(pool.attempt_history(CYCLE,BEFORE,LIMIT),supported=True)))
+"""
+        program = 'MODULE,SOURCE,ROOT,CYCLE,BEFORE,LIMIT = '+repr((module,source,root,cycle,before,limit))+'\n'+program
+        value = json.loads(self.run('python3 -B -c '+shlex.quote(program), timeout=30))
+        # Only structured diagnostics leave the server; never return curl stderr/URLs/paths.
+        fields = {'id','file','attempt','started_at','finished_at','status','offset','bytes_before','bytes_after',
+                  'execution_seconds','budget_seconds','min_speed_bps','low_speed_seconds','cause','curl_code',
+                  'http_status','next_retry_at','request','origin'}
+        items = []
+        for row in value.get('items',[]):
+            item = {k:v for k,v in row.items() if k in fields}
+            item['requests'] = [{k:v for k,v in r.items() if k in fields} for r in row.get('requests',[])]
+            items.append(item)
+        return {'items':items,'next_cursor':value.get('next_cursor'),
+                'legacy_unrecorded':bool(value.get('legacy_unrecorded')),
+                'supported':bool(value.get('supported',True)), 'damaged_records':int(value.get('damaged_records') or 0)}
 
     def _pool_queue_state(self, root: str) -> dict[str, Any]:
         """Read lightweight remote queue telemetry without scanning GRIB data."""
@@ -1784,10 +1809,15 @@ class HpcClient:
             else:
                 wait_reason = ("等待本源下载工作器调度" if state.get("transport_policy") == "per-provider-1"
                                else "等待旧版工作器或共享传输槽；自然完成后切换为两源独立下载")
+        publication_wait = "上游完整周期尚未发布，等待 f072 发布确认"
+        if item.get("publication") == "probing":
+            publication_wait = "正在检查上游 f072 是否已发布"
+        elif re.search(r"curl: \((?:5|6|7|28|35|52|56|60)\)", str(item.get("publication_error") or "")):
+            publication_wait = "连接上游失败，暂无法核验 f072 发布状态，等待自动重试"
         return {
             "queue_status": queue_status,
             "publication_status": str(item.get("publication") or ""),
-            "wait_reason": ("正在检查上游 f072 是否已发布" if item.get("publication")=="probing" else "上游完整周期尚未发布，等待 f072 发布确认") if queue_status=="waiting_publish" else wait_reason,
+            "wait_reason": publication_wait if queue_status=="waiting_publish" else wait_reason,
             "current_file": (current or {}).get("current_file") or (item.get("active_file") if current else None),
             "download_rate_bps": int((current or {}).get("download_rate_bps") or 0),
             "retry_count": max((int(entry.get("attempts") or 0) for entry in entries), default=0),

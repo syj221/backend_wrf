@@ -140,6 +140,20 @@ class ForcingPoolQueueTest(unittest.TestCase):
             queue.enqueue("2026090800", [0], "prefetch")
             self.assertEqual(queue._pick_next(), ("2026090800", -1))
 
+    def test_due_publication_probe_preempts_older_bulk_but_not_tasks(self):
+        for source in ('gfs','ecmwf'):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                queue=queue_module.PoolQueue(args(Path(directory),source))
+                queue.enqueue('2026101800',[0],'prefetch')
+                queue._mark_publication('2026101800','published')
+                queue.enqueue('2026101900',[0],'prefetch')
+                self.assertEqual(queue._pick_next(),('2026101900',-1))
+                queue._mark_publication('2026101900','waiting_publish',queue_module.epoch_now()+300)
+                self.assertEqual(queue._pick_next(),('2026101800',0))
+                queue._mark_publication('2026101900','waiting_publish',0)
+                queue.enqueue('2026101800',[0],'task','forcing_'+'b'*32)
+                self.assertEqual(queue._pick_next(),('2026101800',0))
+
     def test_existing_valid_file_is_deduplicated_and_hashed_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

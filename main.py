@@ -338,7 +338,7 @@ def options() -> dict[str, Any]:
             "capability_version": "wrf-ordinary-2",
             "workbench_management": {"id": "wrf-workbench-management-1",
                 "interaction_revision":"workbench-simplification-3", "async_deletion":True, "include_archived":True,
-                "direct_deletion":True,"forcing_refresh":True,"forcing_cycle_deletion":True,"directory_quarantine":True},
+                "direct_deletion":True,"forcing_refresh":True,"forcing_cycle_deletion":True,"directory_quarantine":True,"forcing_attempt_history":True},
             "recovery_capability": {"schema_version": "wrf-diagnosis-1", "plan_version": "wrf-recovery-2",
                                     "diagnosis": True, "regenerate_plan": True},
             "namelist_capability": {k: namelist_catalog()[k] for k in ("schema_version", "source_hash", "capability_id", "wrf_version", "wps_version")},
@@ -362,6 +362,17 @@ def options() -> dict[str, Any]:
             "default_domains": [],
         }
     )
+
+
+@app.get("/api/wrf/forcing/{source}/cycles/{cycle}/attempts")
+def forcing_attempt_history(source: Literal['gfs','ecmwf'], cycle: str,
+                            before: int | None = Query(None, ge=0), limit: int = Query(20, ge=1, le=100)):
+    try:
+        return ok(hpc_client.forcing_attempt_history(source, cycle, before, limit))
+    except ValueError as exc:
+        raise HTTPException(422, '资料周期或记录页参数无效') from exc
+    except Exception as exc:
+        raise HTTPException(503, '下载记录暂不可读取，请稍后重试') from exc
 
 
 @app.get("/api/wrf/data-status")

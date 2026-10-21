@@ -25,7 +25,7 @@ if 'old.py' in sys.argv[0]:
  with q.exclusive_process(queue.worker_lock) as worker:
   if worker is None:sys.exit(3)
   if a.source=='ecmwf':
-   with q.kernel_guard(root.parent/'.pool-download-slot') as transfer:
+   with q.kernel_guard(root/'.pool-download-slot' if os.environ.get('HANDOFF_MODERN_FIXTURE') else root.parent/'.pool-download-slot') as transfer:
     with q.exclusive(queue.cycle_lock(cycle)):
      queue._set_entry(cycle,0,{'status':'downloading','current_file':queue.file_name(0)})
      path=queue.file_path(cycle,0);path.parent.mkdir(exist_ok=True)
@@ -155,6 +155,37 @@ class PoolHandoffTest(unittest.TestCase):
         self.assertTrue(all(proc.poll() is None for proc in self.workers))
         self.assertEqual(json.loads(self.audit.read_text())['providers'],{})
 
+    def test_gfs_provider_slot_timeout_preserves_worker_and_partial(self):
+        root=Path(self.roots['gfs']);before=h.identity(self.workers[0].pid)
+        single=h.prepare({'gfs':str(root)},str(self.old),str(self.new))
+        program="import importlib.util,sys,time;from pathlib import Path;s=importlib.util.spec_from_file_location('q',sys.argv[1]);q=importlib.util.module_from_spec(s);s.loader.exec_module(q);lock=q.kernel_guard(Path(sys.argv[2])/'.pool-download-slot',blocking=True);lock.__enter__();print('locked',flush=True);time.sleep(2);lock.__exit__(None,None,None)"
+        holder=subprocess.Popen([sys.executable,'-c',program,os.environ['HANDOFF_QUEUE_MODULE'],str(root)],stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(),'locked')
+            with self.assertRaises(TimeoutError):
+                h.handoff(single,q,self.audit,single['digest'],timeout=.2)
+            h.check_identity(before)
+            part=root/'2026101600/gfs.t00z.pgrb2.0p25.f001.part'
+            self.assertEqual(part.read_bytes(),b'GRIBpartial-prefix')
+        finally:
+            holder.wait(timeout=5)
+            holder.stdout.close()
+
+    def test_gfs_only_handoff_preserves_ecmwf_identity_and_partial(self):
+        other=h.identity(self.workers[1].pid)
+        part=Path(self.roots['gfs'])/'2026101600/gfs.t00z.pgrb2.0p25.f001.part'
+        inode=part.stat().st_ino
+        single=h.prepare({'gfs':self.roots['gfs']},str(self.old),str(self.new))
+        record=h.handoff(single,q,self.audit,single['digest'],timeout=12)
+        self.assertEqual(record['status'],'new_workers_started')
+        self.assertEqual(set(record['providers']),{'gfs'})
+        h.check_identity(other)
+        final=Path(str(part).removesuffix('.part'))
+        deadline=time.monotonic()+8
+        while not final.exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertEqual(final.stat().st_ino,inode)
+        self.assertTrue(final.read_bytes().startswith(b'GRIBpartial-prefix'))
+
     def test_ecmwf_only_handoff_preserves_other_source(self):
         single=h.prepare({'ecmwf':self.roots['ecmwf']},str(self.old),str(self.new))
         record=h.handoff(single,q,self.audit,single['digest'],timeout=12)
@@ -192,3 +223,28 @@ class PoolHandoffTest(unittest.TestCase):
         self.assertTrue(all(proc.poll() is None for proc in self.workers))
 
 if __name__=='__main__':unittest.main()
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'requires native Linux pidfd')
+class ModernPoolHandoffTest(unittest.TestCase):
+    stop_samples = PoolHandoffTest.stop_samples
+    restore_env = PoolHandoffTest.restore_env
+    def setUp(self):
+        self.previous_modern=os.environ.get('HANDOFF_MODERN_FIXTURE')
+        os.environ['HANDOFF_MODERN_FIXTURE']='1'
+        self.addCleanup(self.restore_modern)
+        PoolHandoffTest.setUp(self)
+        self.plan.pop('digest');self.plan['source_transfer_fences']=True;self.plan['digest']=h.digest(self.plan)
+    def restore_modern(self):
+        if self.previous_modern is None:os.environ.pop('HANDOFF_MODERN_FIXTURE',None)
+        else:os.environ['HANDOFF_MODERN_FIXTURE']=self.previous_modern
+    def test_modern_two_provider_handoff_waits_for_live_child(self):
+        report=h.handoff(self.plan,q,self.audit,self.plan['digest'],timeout=12)
+        self.assertEqual(report['status'],'new_workers_started')
+        self.assertEqual(set(report['providers']),{'gfs','ecmwf'})
+        self.assertEqual((Path(self.roots['ecmwf'])/'2026101600/ecmwf.t00z.ifs.0p25.f000.grib2').read_bytes(),b'GRIBold-complete7777')
+    def test_modern_timeout_preserves_both_original_processes(self):
+        identities=[h.identity(p.pid) for p in self.workers]
+        with self.assertRaises(TimeoutError):h.handoff(self.plan,q,self.audit,self.plan['digest'],timeout=.2)
+        for item in identities:h.check_identity(item)
+        self.assertEqual(json.loads(self.audit.read_text())['status'],'needs_review')

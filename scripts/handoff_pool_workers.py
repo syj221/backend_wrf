@@ -165,7 +165,7 @@ def handoff(plan, queue_module, audit, expected_digest, timeout=900):
     if digest(unsigned) != expected_digest or plan.get('digest') != expected_digest:
         raise RuntimeError('handoff digest mismatch')
     sources=[w['source'] for w in plan['workers']]
-    if sources not in [['ecmwf'],['ecmwf','gfs']]:
+    if sources not in [['gfs'],['ecmwf'],['ecmwf','gfs']]:
         raise RuntimeError('handoff requires exact approved providers')
     if plan.get('minimum_wait_seconds',0)>timeout:
         raise RuntimeError('wait budget does not cover the approved single-file limit')
@@ -191,15 +191,19 @@ def handoff(plan, queue_module, audit, expected_digest, timeout=900):
     fence_stack=contextlib.ExitStack()
     previous_alarm=None
     try:
-        if sources==['ecmwf']:
+        if sources in [['ecmwf'], ['gfs']] or plan.get('source_transfer_fences'):
             def boundary_expired(*unused):
                 raise TimeoutError('single-file boundary wait exhausted; worker untouched')
             previous_alarm=signal.signal(signal.SIGALRM,boundary_expired)
             signal.setitimer(signal.ITIMER_REAL,timeout)
             # Blocking on the inherited old slot lets the current curl finish
             # and then prevents the old worker from taking the next file.
-            fence_stack.enter_context(queue_module.kernel_guard(roots[0].parent/'.pool-download-slot',blocking=True))
-            report.update(legacy_boundary_acquired_at=time.time())
+            if not plan.get('source_transfer_fences'):
+                fence_stack.enter_context(queue_module.kernel_guard((roots[0]/'.pool-download-slot') if sources==['gfs'] else (roots[0].parent/'.pool-download-slot'),blocking=True))
+            if plan.get('source_transfer_fences'):
+                report.update(provider_slot_wait_started_at=time.time())
+            else:
+                report.update(legacy_boundary_acquired_at=time.time())
             save_audit(audit,report)
         report['providers'] = {}
         pending = list(plan['workers'])
@@ -207,6 +211,9 @@ def handoff(plan, queue_module, audit, expected_digest, timeout=900):
             for worker in list(pending):
                 root = Path(worker['root'])
                 with contextlib.ExitStack() as gates:
+                    if plan.get('source_transfer_fences'):
+                        signal.setitimer(signal.ITIMER_REAL,max(.001,deadline-time.monotonic()))
+                        gates.enter_context(queue_module.kernel_guard(root/'.pool-download-slot',blocking=True))
                     verify_module(plan['old_module'], plan['old_sha'])
                     verify_module(plan['new_module'], plan['new_sha'])
                     check_identity(worker['process'])
@@ -315,14 +322,12 @@ def operator_main():
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--digest')
     parser.add_argument('--timeout', type=int)
-    parser.add_argument('--source', choices=['both','ecmwf'], default='both')
+    parser.add_argument('--source', choices=['both','ecmwf','gfs'], default='both')
     parser.add_argument('--previous-plan', type=Path)
     args = parser.parse_args()
-    args.timeout=args.timeout if args.timeout is not None else 4200 if args.source=='ecmwf' else 900
+    args.timeout=args.timeout if args.timeout is not None else 4200 if args.source in {'ecmwf','gfs'} else 900
     if not 1 <= args.timeout <= 7200 or (args.apply and not args.digest):
         parser.error('apply requires original digest; timeout must be 1..7200 seconds')
-    if args.source=='ecmwf' and (not args.previous_plan or args.timeout<4200):
-        parser.error('ECMWF requires predecessor evidence and at least 4200 seconds')
     project = Path(__file__).resolve().parents[2]
     target = args.plan.resolve()
     if project / '.run' not in target.parents:
@@ -332,16 +337,33 @@ def operator_main():
     from hpc_transport import HpcClient
     from runtime_release import require_ready
     client = HpcClient(settings)
-    # This compatibility bridge is only for the inspected, frozen legacy 15
-    # worker. Other versions need their own reviewed lock contract.
-    old = settings.hpc_release_root + '/releases/ordinary-20261014-15/scripts/forcing_pool_queue.py'
+    # Each bridge is tied to inspected immutable modules and a known slot protocol.
+    modern = settings.hpc_runtime_release == 'ordinary-20261020-19'
+    if modern:
+        if args.timeout < 4200 or args.previous_plan:
+            raise RuntimeError('Modern provider bridge requires a 4200-second budget and no legacy transaction')
+        old_release = 'ordinary-20261019-18'
+    elif args.source == 'gfs':
+        bridges = {'ordinary-20261019-17': 'ordinary-20261016-16',
+                   'ordinary-20261019-18': 'ordinary-20261019-17'}
+        if settings.hpc_runtime_release not in bridges or args.timeout < 4200 or args.previous_plan:
+            raise RuntimeError('GFS bridge requires an approved immutable target and 4200-second budget')
+        old_release = bridges[settings.hpc_runtime_release]
+    else:
+        if settings.hpc_runtime_release != 'ordinary-20261016-16':
+            raise RuntimeError('unexpected target runtime; inspect before handoff')
+        old_release = 'ordinary-20261014-15'
+    old = settings.hpc_release_root + '/releases/' + old_release + '/scripts/forcing_pool_queue.py'
     new = settings.hpc_release_root + '/releases/' + settings.hpc_runtime_release + '/scripts/forcing_pool_queue.py'
-    if settings.hpc_runtime_release != 'ordinary-20261016-16':
-        raise RuntimeError('unexpected target runtime; inspect before handoff')
     roots = {'gfs': settings.hpc_gfs_dir, 'ecmwf': settings.hpc_ec_dir}
+    if args.source=='gfs':
+        roots={'gfs':settings.hpc_gfs_dir}
     previous=None
     if args.source=='ecmwf':
         roots={'ecmwf':settings.hpc_ec_dir}
+    if args.source=='ecmwf' and not modern:
+        if not args.previous_plan or args.timeout<4200:
+            parser.error('Legacy ECMWF requires predecessor evidence and at least 4200 seconds')
         previous=json.loads(args.previous_plan.read_text())
         prior=previous['plan'];expected=settings.hpc_release_root+'/maintenance/pool-handoff/'+prior['digest']+'.json'
         if previous['audit']!=expected or digest({k:v for k,v in prior.items() if k!='digest'})!=prior['digest']:
@@ -353,6 +375,10 @@ def operator_main():
         ready = require_ready(client, settings, force=True)
         if not args.apply:
             program = header + '\nplan=prepare(' + repr(roots) + ',' + repr(old) + ',' + repr(new) + ')\n'
+            if modern:
+                program+='plan.pop("digest");plan["minimum_wait_seconds"]=4200;plan["source_transfer_fences"]=True;plan["digest"]=digest(plan)\n'
+            elif args.source=='gfs':
+                program+='plan.pop("digest");plan["minimum_wait_seconds"]=4200;plan["digest"]=digest(plan)\n'
             if previous:
                 program+='plan.pop("digest");plan["predecessor"]=verify_unacted_ecmwf(json.loads('+repr(json.dumps(previous))+'),plan);plan["minimum_wait_seconds"]=4200;plan["digest"]=digest(plan)\n'
             program+='print(json.dumps(plan))'

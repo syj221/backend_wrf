@@ -101,6 +101,9 @@ def remote_command(root, mode, *args):
 
 
 def deploy(client, settings, apply=False):
+    if apply and getattr(settings, "hpc_runtime_release", ""):
+        raise RuntimeError("Immutable runtime release: in-place generator deployment is disabled; "
+                           "use scripts/deploy_runtime_release.py to create a new release")
     from namelist_config import source_catalog
     ordinary_idle(settings)
     root = client.service_dir()
