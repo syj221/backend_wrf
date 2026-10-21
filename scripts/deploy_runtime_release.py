@@ -238,7 +238,88 @@ def thin_native_inventory(wrf, wps):
     for relative in TABLES:
         if relative not in selected: raise ValueError('Missing thin runtime table: '+relative)
     return dict(sorted(selected.items()))
-def read_source_anchor(root):
+def read_independent_source_anchor(root, source, anchor_path, anchor, expected_binding=None, physical_source=None):
+    physical_source=physical_source or source
+    bundle_id=anchor.get('bundle_id','')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}',bundle_id):
+        raise ValueError('Invalid independent source bundle ID')
+    bundle=root/'source-store'/bundle_id
+    if (bundle.is_symlink() or bundle.resolve(strict=True)!=bundle or not bundle.is_dir()
+            or anchor.get('bundle_path')!=str(bundle) or bundle.stat().st_mode & 0o222 or bundle.stat().st_uid!=os.getuid()):
+        raise ValueError('Independent source bundle path changed')
+    manifest_path=bundle/'manifest.json'
+    if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_mode & 0o222:
+        raise ValueError('Independent source manifest is not sealed')
+    manifest=json.loads(manifest_path.read_text())
+    if (manifest.get('schema')!='wrf-source-bundle-1' or manifest.get('bundle_id')!=bundle_id
+            or manifest.get('fingerprint')!=document_digest({k:v for k,v in manifest.items() if k!='fingerprint'})
+            or anchor.get('bundle_manifest_sha256')!=sha(manifest_path)):
+        raise ValueError('Independent source manifest binding changed')
+    inventory=manifest.get('files',{})
+    actual=set()
+    for path in bundle.rglob('*'):
+        if path.is_symlink() or path.stat().st_mode & 0o222 or path.stat().st_uid!=os.getuid():
+            raise ValueError('Independent source is unsafe or writable')
+        if path.is_file():
+            name=str(path.relative_to(bundle))
+            if name!='manifest.json':
+                if inventory.get(name)!=sha(path):raise ValueError('Independent source content changed: '+name)
+                actual.add(name)
+        elif not path.is_dir():raise ValueError('Unsupported independent source entry')
+    if actual!=set(inventory):raise ValueError('Independent source inventory differs')
+    original_path=bundle/'provenance/release-manifest.json'
+    legacy_path=bundle/'provenance/source-anchor-v1.json'
+    original=json.loads(original_path.read_text());legacy=json.loads(legacy_path.read_text())
+    validation=original.get('validation',{})
+    if (original.get('schema')!='wrf-runtime-release-1' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}',original.get('release_id',''))
+            or original.get('layout',{}).get('mode')=='thin'
+            or original.get('fingerprint')!=document_digest({k:v for k,v in original.items() if k!='fingerprint'})
+            or validation.get('complete') is not True or validation.get('schema')!='wrf-release-validation-1'
+            or validation.get('checks')!=list(VALIDATION_CHECKS)
+            or validation.get('content_sha256')!=document_digest(release_content(original))
+            or legacy.get('schema')!='wrf-source-anchor-1'
+            or legacy.get('release_id')!=original.get('release_id')
+            or legacy.get('release_manifest_sha256')!=sha(original_path)
+            or legacy.get('release_fingerprint')!=original.get('fingerprint')):
+        raise ValueError('Independent source provenance changed')
+    native_source={k:v for k,v in original['files'].items() if k.startswith(('wrf/','wps/'))}
+    if ({k:v for k,v in inventory.items() if k.startswith(('wrf/','wps/'))}!=native_source
+            or set(inventory)-set(native_source)!={'provenance/release-manifest.json','provenance/source-anchor-v1.json'}
+            or manifest.get('build')!=original.get('build')
+            or anchor.get('configuration_source_hash')!=original['build']['source_hash']
+            or legacy.get('configuration_source_hash')!=original['build']['source_hash']
+            or anchor.get('protected_release_paths')!=[] or anchor.get('source_trees_readonly') is not True):
+        raise ValueError('Independent source build or inventory changed')
+    components=[];old_components=[]
+    old_release=root/'releases'/original['release_id']
+    for folder,name,version in [('wrf','wrf-4.7.1','4.7.1'),('wps','wps-4.6.0','4.6.0')]:
+        target=bundle/folder;link=physical_source/name
+        if target.is_symlink() or not target.is_dir() or not link.is_symlink() or os.readlink(str(link))!=str(target):
+            raise ValueError('Independent source link changed')
+        files={k[len(folder)+1:]:v for k,v in native_source.items() if k.startswith(folder+'/')}
+        common={'name':name,'version':version,'path':str(source/name),'file_count':len(files),'source_inventory_sha256':document_digest(files)}
+        components.append(dict(common,target=str(target)))
+        old_components.append(dict(common,target=str(old_release/folder)))
+    if (anchor.get('components')!=components or legacy.get('components')!=old_components
+            or legacy.get('release_path')!=str(old_release) or legacy.get('protected_release_paths')!=[str(old_release)]
+            or legacy.get('source_trees_readonly') is not True):
+        raise ValueError('Independent source component provenance changed')
+    legacy_binding={'path':str(anchor_path),'sha256':sha(legacy_path),'digest':document_digest(legacy),
+                    'release_id':original['release_id'],'release_fingerprint':original['fingerprint'],
+                    'release_manifest_sha256':sha(original_path)}
+    if manifest.get('legacy_binding')!=legacy_binding:raise ValueError('Legacy source binding changed')
+    native=thin_native_inventory(bundle/'wrf',bundle/'wps')
+    if any(native_source.get(k)!=v for k,v in native.items()):raise ValueError('Independent native inventory changed')
+    binding={'path':str(anchor_path),'sha256':sha(physical_source/'anchor.json'),'digest':document_digest(anchor),
+             'bundle_id':bundle_id,'bundle_manifest_sha256':sha(manifest_path),'bundle_fingerprint':manifest['fingerprint']}
+    # Frozen thin manifests retain their exact v1 binding, verified from the
+    # sealed provenance copy. No old release directory is read or required.
+    if expected_binding is not None and expected_binding!=binding:
+        if expected_binding!=legacy_binding:raise ValueError('Unknown frozen source binding')
+        binding=legacy_binding
+    return binding,native,manifest['build']
+
+def read_source_anchor(root, expected_binding=None):
     root=root.resolve(strict=True)
     source=root/'source';anchor_path=source/'anchor.json'
     if source.is_symlink() or not source.is_dir() or anchor_path.is_symlink() or not anchor_path.is_file():
@@ -246,6 +327,8 @@ def read_source_anchor(root):
     if source.stat().st_mode & 0o222 or anchor_path.stat().st_mode & 0o222:
         raise ValueError('Source anchor is not sealed read-only')
     anchor=json.loads(anchor_path.read_text())
+    if anchor.get('schema')=='wrf-source-anchor-2':
+        return read_independent_source_anchor(root,source,anchor_path,anchor,expected_binding)
     if anchor.get('schema')!='wrf-source-anchor-1' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}',anchor.get('release_id','')):
         raise ValueError('Invalid source anchor manifest')
     release=root/'releases'/anchor['release_id'];manifest_path=release/'manifest.json'
@@ -314,7 +397,7 @@ def validate_thin_layout(stage,manifest):
     if (not isinstance(layout,dict) or set(layout)!={'schema','mode','native_files','native_inventory_sha256','source_anchor'}
             or layout.get('schema')!='wrf-runtime-layout-1' or layout.get('mode')!='thin'):
         raise ValueError('Invalid thin runtime layout')
-    binding,anchored,build=read_source_anchor(stage.parent.parent)
+    binding,anchored,build=read_source_anchor(stage.parent.parent,layout.get('source_anchor'))
     native=layout.get('native_files')
     if native!=anchored or layout.get('native_inventory_sha256')!=document_digest(anchored) or layout.get('source_anchor')!=binding:
         raise ValueError('Thin native inventory differs from fixed source anchor')
