@@ -9,3 +9,5 @@
 验证命令：`python -m pip install -r requirements.lock -r requirements-native-tests.txt pytest httpx` 后执行 `python -m pytest -q`。新增 WRF Backend CI 使用 Python 3.11 和锁定的公开 DB 提交，仅创建测试数据库。原 DB 三个本地提交完全不参与交付。
 
 完整本轮命令输出、干净克隆及远端 CI 结果保存在工作区 `.run/git-integration-20261114/evidence/`。真实模型、HPC 数值计算及运行服务切换不属于本次隔离验证范围。验收后清点临时克隆/依赖，经用户确认再清理；配置、维护备份与必要验收证据保留。
+
+Linux CI 首轮 618 通过、1 失败：目录移除测试把所有 Path.open 都拦截，误阻止安全门禁读取 `/proc/self/mountinfo`。仅夹具精确允许该元数据读取，任务内容和链接目标读取仍抛异常；生产挂载门禁及删除规则完全保持。

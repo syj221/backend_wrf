@@ -33,7 +33,14 @@ class DirectoryDeletionTest(unittest.TestCase):
         path=self.root/'task';path.mkdir();(path/'huge').write_bytes(b'payload')
         shared=self.root/'shared';shared.write_text('protected');(path/'link').symlink_to(shared)
         snapshot=deletion.identity(path);item=deletion.intent(snapshot,'delete_test')
-        with patch('pathlib.Path.open',side_effect=AssertionError('Must not read contents')):
+        open_path=Path.open
+        def metadata_only(candidate,*args,**kwargs):
+            # Mount metadata is required by the Linux ownership gate; task
+            # contents and symlink targets must still never be opened.
+            if candidate == Path('/proc/self/mountinfo'):
+                return open_path(candidate,*args,**kwargs)
+            raise AssertionError('Must not read contents')
+        with patch('pathlib.Path.open',metadata_only):
             deletion.quarantine(item)
             self.assertFalse(path.exists());self.assertTrue(Path(item['trash'],'task').exists())
             # A fresh task at the old path must never be deleted by deferred cleanup.
