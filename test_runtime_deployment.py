@@ -124,6 +124,7 @@ class RuntimeDeploymentTest(TestCase):
     def test_geography_is_rechecked_on_first_activation_resume_and_readiness(self):
         self.seal()
         self.assertTrue(self.geography_readiness()['ok'])
+        self.assertFalse((self.stage/'scripts/__pycache__').exists())
         (self.geog/'global/00001-00002.00001-00002').unlink()
         self.assertFalse(self.geography_readiness()['ok'])
         with self.assertRaisesRegex(ValueError,'tile inventory differs'): self.resume()
@@ -151,6 +152,7 @@ class RuntimeDeploymentTest(TestCase):
         # Old immutable manifests are not silently upgraded by local changes.
         (self.geog/'global/00001-00002.00001-00002').unlink()
         self.assertTrue(self.geography_readiness()['ok'])
+        self.assertFalse((self.stage/'scripts/__pycache__').exists())
         self.assertEqual(self.resume()['status'],'installed')
 
     def write_manifest(self, manifest):

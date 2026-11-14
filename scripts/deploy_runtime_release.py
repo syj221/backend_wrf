@@ -70,7 +70,7 @@ def binary_dependencies(stage, python, tools=None):
 def geography_contract(stage, geog, expected=None):
     helper=stage/'scripts/validate_geography.py'
     spec=importlib.util.spec_from_file_location('_wrf_release_geography',str(helper))
-    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    module=importlib.util.module_from_spec(spec);exec(compile(helper.read_bytes(),str(helper),'exec'),module.__dict__)
     return module.validate_geography(stage/'wps/geogrid/GEOGRID.TBL',geog,expected)
 def validate_release(stage, manifest, expected_release=None, require_complete=True):
     if manifest.get('schema')!='wrf-runtime-release-1': raise ValueError('Invalid release manifest schema')
@@ -136,7 +136,7 @@ def validate_release(stage, manifest, expected_release=None, require_complete=Tr
     if set(build['binary_hashes'])!={'wrf','real','geogrid','ungrib','metgrid'} or set(build['generator_hashes'])!={'apply_namelist_plan.py','namelist_layout.py','wrf.sh'}:
         raise ValueError('Incomplete binary or generator build contract')
     spec=importlib.util.spec_from_file_location('_wrf_release_source_probe',str(stage/'scripts/namelist_source_probe.py'))
-    probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
+    probe=importlib.util.module_from_spec(spec);exec(compile((stage/'scripts/namelist_source_probe.py').read_bytes(),str(stage/'scripts/namelist_source_probe.py'),'exec'),probe.__dict__)
     current=probe.snapshot(str(stage/'wrf'),str(stage/'wps'),str(stage/'scripts'))
     if any(current.get(k)!=v for k,v in build.items()): raise ValueError('Retained release build contract changed')
     for relative in TABLES:

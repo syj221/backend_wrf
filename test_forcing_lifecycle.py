@@ -146,7 +146,8 @@ class DeadlineAndReferenceTest(unittest.TestCase):
 
     def test_cleanup_reads_references_only_after_binding_lock_is_released(self):
         with tempfile.TemporaryDirectory() as directory:
-            cfg = replace(settings, database_path=Path(directory) / 'test.sqlite')
+            cfg = replace(settings, database_path=Path(directory) / 'test.sqlite',
+                          hpc_workbench_data_root='/fixture', hpc_gfs_dir='/fixture/forcing/gfs')
             store, gfs, hpc = Mock(), Mock(), Mock()
             store.forcing_download_cycles.return_value = set()
             store.active.return_value = []

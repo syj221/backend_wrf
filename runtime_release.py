@@ -94,7 +94,7 @@ if 'geography' in manifest:
         if helper.is_symlink() or not helper.is_file() or manifest.get('files',{}).get('scripts/validate_geography.py')!=hashlib.sha256(helper.read_bytes()).hexdigest():
             raise ValueError('Geography validator is not pinned by the release')
         spec=importlib.util.spec_from_file_location('_wrf_geography_gate',str(helper))
-        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        module=importlib.util.module_from_spec(spec);exec(compile(helper.read_bytes(),str(helper),'exec'),module.__dict__)
         actual=module.validate_geography(release/'wps/geogrid/GEOGRID.TBL',geog,contract)
         check('geography',True,actual['digest'])
     except Exception as exc: check('geography',False,exc)

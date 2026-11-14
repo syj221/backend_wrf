@@ -1,0 +1,28 @@
+name: WRF Backend CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend_wrf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: backend_wrf
+      - uses: actions/checkout@v4
+        with:
+          repository: Leon-Developer-Java/DB
+          ref: 2f26f45f15fa503227ed644f33c173b3dd96a7e0
+          path: DB
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            backend_wrf/requirements.lock
+            backend_wrf/requirements-native-tests.txt
+      - run: python -m pip install -r requirements.lock -r requirements-native-tests.txt pytest httpx
+      - run: python -m pytest -q

@@ -1788,9 +1788,10 @@
     {
       "file": "hpc_transport.py",
       "symbol": "HpcClient.complete_forcing_cycles",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "0d0ef4fd181888d4a7061b30bd53501fb75419f69294c79c9ec2d5cc1951eb3e"
+      "origin": "compatibility",
+      "reason": "reject_explicit_integrity_failure_when_selecting_complete_forcing_cycles",
+      "baseline_sha256": "0d0ef4fd181888d4a7061b30bd53501fb75419f69294c79c9ec2d5cc1951eb3e",
+      "compatibility_sha256": "aa9427bea41aacec197ce250d869c01c5630421dbb2d8a9b9e85f699ea28b652"
     },
     {
       "file": "hpc_transport.py",
