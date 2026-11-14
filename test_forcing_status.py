@@ -102,14 +102,14 @@ class PrefetchSummaryTest(TestCase):
                 manager._prefetch_latest_gfs_once()
                 summary=manager.gfs_prefetch_status
                 self.assertEqual(summary['status'],expected)
-                self.assertEqual([v['status'] for v in summary['actions']],[gfs_status,ec_status])
+                self.assertEqual([v['status'] for v in summary['actions']],[gfs_status,ec_status,ec_status])
                 for action in summary['actions']:
                     if action['status']=='downloading':
                         self.assertEqual(action['current_file'],'f018')
                         self.assertIn('下载中',action['detail'])
                         self.assertEqual(action['completed_files'],18)
                 self.assertEqual(manager.hpc.trigger_gfs_download.call_count,int(gfs_status!='ready'))
-                self.assertEqual(manager.hpc.trigger_forcing_download.call_count,int(ec_status!='ready'))
+                self.assertEqual(manager.hpc.trigger_forcing_download.call_count,2*int(ec_status!='ready'))
                 manager.hpc.auto_cleanup_gfs_cycles.assert_not_called()
                 manager.hpc.auto_cleanup_forcing_cycles.assert_not_called()
 
@@ -117,10 +117,10 @@ class PrefetchSummaryTest(TestCase):
         manager=self.manager('ready','ready')
         incomplete=[{'cycles':[{'cycle':'2026101400','complete':False}]}]
         manager.hpc.gfs_pool_items.side_effect=[incomplete,manager.hpc.gfs_pool_items.return_value]
-        manager.hpc.forcing_pool_items.side_effect=[incomplete,manager.hpc.forcing_pool_items.return_value]
+        manager.hpc.forcing_pool_items.side_effect=[incomplete,manager.hpc.forcing_pool_items.return_value,manager.hpc.forcing_pool_items.return_value,manager.hpc.forcing_pool_items.return_value]
         manager._prefetch_latest_gfs_once()
         self.assertEqual(manager.gfs_prefetch_status['status'],'ready')
-        self.assertEqual([v['detail'] for v in manager.gfs_prefetch_status['actions']],['73/73','25/25'])
+        self.assertEqual([v['detail'] for v in manager.gfs_prefetch_status['actions']],['73/73','25/25','25/25'])
         manager.hpc.trigger_gfs_download.assert_called_once()
         manager.hpc.trigger_forcing_download.assert_called_once()
 

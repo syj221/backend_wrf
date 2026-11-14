@@ -3,6 +3,8 @@
 import argparse
 import datetime as dt
 import json
+import math
+import os
 from pathlib import Path
 
 SOIL_TEMPERATURE = {'st', 'stl1', 'sot'}
@@ -23,21 +25,41 @@ def soil_layer(get, level_type):
     return ('index' if level_type.startswith('soil') else 'metres', first, second)
 
 
-def validate(path, valid_time=None, bounds=None, p_top_pa=5000):
+def validate(path, valid_time=None, bounds=None, p_top_pa=5000, expected_spacing=None):
     from eccodes import codes_get, codes_get_array, codes_grib_new_from_file, codes_release
     fields, pressure, soils, times, boxes = set(), set(), set(), set(), []
     pressure_fields, soil_fields, grids = {}, {}, set()
+    spacing = {}
     count = 0
+    decoded_bytes, unparsed, invalid_values = 0, False, False
     with path.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
         while True:
             handle = codes_grib_new_from_file(stream)
             if handle is None: break
             try:
                 count += 1
+                offset = int(codes_get(handle, 'offset'))
+                length = int(codes_get(handle, 'totalLength'))
+                if offset < 0 or offset > decoded_bytes or length <= 0:
+                    unparsed = True
+                # Multi-field handles may refer to the same GRIB message.
+                decoded_bytes = max(decoded_bytes, offset + length)
+                # Metadata alone does not exercise the packed data section.
+                values = codes_get_array(handle, 'values')
+                if values.size == 0:
+                    invalid_values = True
+                del values
                 name = str(codes_get(handle, 'shortName'))
                 level_type = str(codes_get(handle, 'typeOfLevel'))
                 level = float(codes_get(handle, 'level'))
                 fields.add(name)
+                if expected_spacing is not None:
+                    signature = str(codes_get(handle, 'md5GridSection'))
+                    if signature not in spacing:
+                        spacing[signature] = (str(codes_get(handle, 'gridType')),
+                            float(codes_get(handle, 'iDirectionIncrementInDegrees')),
+                            float(codes_get(handle, 'jDirectionIncrementInDegrees')))
                 if level_type in ('isobaricInhPa', 'isobaricInPa'):
                     pressure_level = level / 100 if level_type == 'isobaricInPa' else level
                     pressure.add(pressure_level)
@@ -59,7 +81,25 @@ def validate(path, valid_time=None, bounds=None, p_top_pa=5000):
                     boxes.append((float(lats.min()),float(lons.min()),float(lats.max()),float(lons.max())))
             finally:
                 codes_release(handle)
+        closed = os.fstat(stream.fileno())
     issues = []
+    if unparsed or decoded_bytes != opened.st_size:
+        issues.append('unparsed_grib_bytes')
+    if invalid_values:
+        issues.append('invalid_field_values')
+    def signature(info):
+        return (info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        unchanged = signature(opened) == signature(closed) == signature(path.stat())
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        issues.append('forcing_file_changed')
+    if expected_spacing is not None and (not spacing or any(
+            row[0] != 'regular_ll' or not math.isclose(row[1], expected_spacing, abs_tol=1e-7)
+            or not math.isclose(row[2], expected_spacing, abs_tol=1e-7) for row in spacing.values())):
+        issues.append('grid_spacing_mismatch')
     for label, alternatives in (('temperature', {'t'}),('u_wind',{'u'}),('v_wind',{'v'}),
                                  ('humidity',{'r','q'}),('geopotential',{'gh','z'}),
                                  ('surface_pressure',{'sp','pres'}),('surface_temperature',{'2t','t2m','t'}),
@@ -80,7 +120,8 @@ def validate(path, valid_time=None, bounds=None, p_top_pa=5000):
     if bounds and (not boxes or any(b[0] > bounds[0] or b[1] > bounds[1] or b[2] < bounds[2] or b[3] < bounds[3] for b in boxes)):
         issues.append('insufficient_spatial_coverage')
     return {'schema':'wrf-forcing-validation-1','name':path.name,'messages':count,
-            'fields':sorted(fields),'pressure_levels':sorted(pressure),'soil_layers':sorted(soils),
+            'decoded_bytes':decoded_bytes,'file_bytes':opened.st_size,
+            'grid_spacings':sorted(set(spacing.values())),'fields':sorted(fields),'pressure_levels':sorted(pressure),'soil_layers':sorted(soils),
             'valid_times':sorted(times),'issues':issues,'valid':count>0 and not issues}
 
 
@@ -89,5 +130,6 @@ if __name__ == '__main__':
     parser.add_argument('path', type=Path); parser.add_argument('--valid-time')
     parser.add_argument('--bounds', nargs=4, type=float)
     parser.add_argument('--p-top-pa', type=float, default=5000)
+    parser.add_argument('--grid-spacing', type=float)
     args = parser.parse_args()
-    print(json.dumps(validate(args.path, args.valid_time, args.bounds, args.p_top_pa)))
+    print(json.dumps(validate(args.path, args.valid_time, args.bounds, args.p_top_pa, args.grid_spacing)))

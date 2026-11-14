@@ -52,7 +52,7 @@ def no_live_processes(proof, control):
 def reclaim(resource, approved, apply=False):
     resource = Path(resource)
     control = Path(approved['control'])
-    if (not re.fullmatch(r'wrf_(?:gfs|ecmwf|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}', approved['task_id'])
+    if (not re.fullmatch(r'wrf_(?:gfs|ecmwf|ecmwf_0p1|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}', approved['task_id'])
             or not re.fullmatch(r'[a-f0-9]{32}', approved['attempt'])
             or not re.fullmatch(r'delete_[a-f0-9]{32}', approved['deletion_id'])):
         raise ValueError('Invalid approved lease identity')

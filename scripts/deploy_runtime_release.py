@@ -498,6 +498,7 @@ with (root/'deployment.lock').open('a') as lock:
     (stage/'runtime.env').write_text('\n'.join('export '+k+'='+shlex.quote(v) for k,v in sorted(env.items()))+'\n')
     manifest={'schema':'wrf-runtime-release-1','release_id':cfg['release_id'],'geog_path':cfg['geog'],
               'minimum_free_bytes':cfg['minimum_free_bytes'],'python':cfg['python'],'runtime_tools':tools,'files':{}}
+    if not cfg.get('activate',True): manifest['activation_policy']='staged'
     manifest['geography']=geography_contract(stage,Path(cfg['geog']))
     if layout is not None: manifest['layout']=layout
     sys.path.insert(0,str(stage/'scripts'))
@@ -519,8 +520,9 @@ with (root/'deployment.lock').open('a') as lock:
     make_readonly(stage)
     os.rename(str(stage),str(target))
     target.chmod(0o555)
-    current=root/('current.'+cfg['release_id']); current.symlink_to(target)
-    os.replace(str(current),str(root/'current'))
+    if cfg.get('activate',True):
+        current=root/('current.'+cfg['release_id']); current.symlink_to(target)
+        os.replace(str(current),str(root/'current'))
     (root/'manifests'/('release-'+cfg['release_id']+'.json')).write_text(json.dumps(manifest,sort_keys=True,indent=2))
     print(json.dumps({'status':'installed','release_id':cfg['release_id'],'fingerprint':manifest['fingerprint'],'files':len(manifest['files'])}))
 '''
@@ -539,14 +541,15 @@ with (root/'deployment.lock').open('a') as lock:
     if target.exists(): raise ValueError('Release already exists; inspect instead of replay')
     make_readonly(stage)
     stage.chmod(0o755);os.rename(str(stage),str(target));target.chmod(0o555)
-    temporary=root/('current.'+manifest['release_id']);temporary.symlink_to(target)
-    os.replace(str(temporary),str(root/'current'))
+    if manifest.get('activation_policy')!='staged':
+        temporary=root/('current.'+manifest['release_id']);temporary.symlink_to(target)
+        os.replace(str(temporary),str(root/'current'))
     (root/'manifests'/('release-'+manifest['release_id']+'.json')).write_text(json.dumps(manifest,sort_keys=True,indent=2))
     print(json.dumps({'status':'installed','release_id':manifest['release_id'],'fingerprint':manifest['fingerprint'],'files':len(manifest['files'])}))
 '''
 
 
-def deploy(client, settings, root, data, python, release_id, apply=False, eccodes_root=None, thin=False):
+def deploy(client, settings, root, data, python, release_id, apply=False, eccodes_root=None, thin=False, activate=True):
     from hpc_transport import SAFE_REMOTE_ROOT
     import re
     if not all(SAFE_REMOTE_ROOT.fullmatch(p) and p.startswith('/') for p in (root,data,python)):
@@ -558,6 +561,7 @@ def deploy(client, settings, root, data, python, release_id, apply=False, eccode
             'geog':settings.hpc_geog_dir,'python':python,'minimum_free_bytes':int(settings.hpc_runtime_min_free_gb*1024**3),
             'scripts':scripts}
     if thin: config['thin']=True
+    if not activate: config['activate']=False
     if not apply: return {'mode':'plan','system_root':root,'data_root':data,'config':config}
     # Deployment copies binaries; it neither stops nor launches computations.
     command='. '+shlex.quote(settings.hpc_runtime_env)+" >/dev/null 2>&1 && python3 -c "+shlex.quote(
@@ -668,6 +672,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('system-root','data-root','python','release-id'): parser.add_argument('--'+name,required=True)
     parser.add_argument('--apply',action='store_true')
+    parser.add_argument('--stage-only',action='store_true',help='Install and validate a sealed release without changing the current link')
     parser.add_argument('--thin',action='store_true',help='Copy only the complete native runtime and source metadata pinned by the fixed source anchor; default remains a full source copy')
     parser.add_argument('--eccodes-root', help='Read-only prefix of the pinned ecCodes C library')
     parser.add_argument('--resume-staging', help='Verify and finish an already validated retained transaction')
@@ -685,4 +690,4 @@ if __name__=='__main__':
         if not args.apply or not re.fullmatch('[0-9a-f]{32}',args.resume_staging): parser.error('Resume requires --apply and an exact transaction token')
         print(json.dumps(resume(HpcClient(settings),args.system_root,args.resume_staging,args.python,args.release_id),ensure_ascii=False))
     else:
-        print(json.dumps(deploy(HpcClient(settings),settings,args.system_root,args.data_root,args.python,args.release_id,args.apply,args.eccodes_root,args.thin),ensure_ascii=False))
+        print(json.dumps(deploy(HpcClient(settings),settings,args.system_root,args.data_root,args.python,args.release_id,args.apply,args.eccodes_root,args.thin,activate=not args.stage_only),ensure_ascii=False))

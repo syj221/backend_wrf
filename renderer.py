@@ -276,6 +276,8 @@ def _align_output_times(
 def _source_metadata(data_source: Any, cycle: str) -> dict[str, str]:
     """Keep forcing provenance source-specific in the published manifest."""
     source = str(data_source or "gfs").strip().lower()
+    if source == "ecmwf_0p1":
+        return {"data_source": "ECMWF IFS 0.1°", "ecmwf_cycle": cycle, "forcing_product": "ecmwf-ifs-0p1"}
     if source in {"ec", "ecmwf"}:
         return {"data_source": "ECMWF", "ecmwf_cycle": cycle}
     return {"data_source": "GFS", "gfs_cycle": cycle}

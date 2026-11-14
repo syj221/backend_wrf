@@ -43,7 +43,7 @@ def definition(capability_id=None):
         "physics_default_rules": {"cu_physics":{"at_or_below_spacing_m":3000,"fine_value":0,"coarse_value":3,"explicit_values_take_precedence":True}},
         "defaults": {"spinup":{"mode":"custom","hours":6},"vertical_levels":88,"history_interval_minutes":60,
                      "assimilation_scheme":"off","data_source":"gfs","forecast_interval_hours":1,"domains":[]},
-        "data_sources": ["gfs", "ecmwf"], "forecast_intervals": {"gfs":[1,3,6],"ecmwf":[3]},
+        "data_sources": ["gfs", "ecmwf", "ecmwf_0p1"], "forecast_intervals": {"gfs":[1,3,6],"ecmwf":[3],"ecmwf_0p1":[3]},
         "history_intervals_minutes": [10,30,60,180,360],
         "assimilation_schemes": [{"value":v,"label":label} for v,label in (("off","关闭"),("fdda_weak","弱网格松弛"),("fdda_standard","标准网格松弛"),("fdda_strong","强网格松弛"))],
         "geometry": {"projections":["lambert","mercator","polar"],"max_domains":4,"nesting_ratios":[3,5],"grid_limits":[10,500],"geog_data_res":["default"],"equal_dx_dy":True,"outer_spacing_limits_m":[1000,50000],"finest_spacing_min_m":1000,
@@ -60,9 +60,17 @@ def validate_geometry(domains):
         raise ValueError('当前普通配置服务要求最细网格不小于1 km、D01不大于50 km；请调整网格距或嵌套层数')
 
 
+def aligned_future_start(now, interval=1):
+    """Align future requests upward to the same UTC grid used by validation."""
+    import math
+
+    if type(interval) is not int or interval <= 0 or 24 % interval:
+        raise ValueError('驱动间隔必须是可对齐UTC整点的正整数小时')
+    return datetime.fromtimestamp(math.ceil(now.timestamp() / (interval * 3600)) * interval * 3600, timezone.utc)
+
+
 def default_time(interval=1, duration=24):
-    start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    start -= timedelta(hours=start.hour % interval)
+    start = aligned_future_start(datetime.now(timezone.utc), interval)
     return {"start_time":start.isoformat().replace("+00:00","Z"), "end_time":(start+timedelta(hours=duration)).isoformat().replace("+00:00","Z")}
 
 
@@ -76,7 +84,7 @@ def normalize(request):
         return result
     source = result.get('data_source','gfs')
     interval = result.get('forecast_interval_hours',1)
-    if source not in {'gfs','ecmwf'} or type(interval) is not int or interval not in ([3] if source=='ecmwf' else [1,3,6]):
+    if source not in {'gfs','ecmwf','ecmwf_0p1'} or type(interval) is not int or interval not in ([3] if source!='gfs' else [1,3,6]):
         raise ValueError('资料及边界间隔不合法；ECMWF只支持3小时')
     output_interval = result.get('history_interval_minutes',60)
     if type(output_interval) is not int or output_interval not in {10,30,60,180,360}:

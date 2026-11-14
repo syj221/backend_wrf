@@ -25,7 +25,7 @@ from config import Settings
 from gfs import normalize_source
 
 
-SAFE_TASK_ID = re.compile(r"^(?:wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}|wrf_agent_[0-9a-f]{32})$")
+SAFE_TASK_ID = re.compile(r"^(?:wrf_(?:(?:gfs|ecmwf|ecmwf_0p1)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}|wrf_agent_[0-9a-f]{32})$")
 SAFE_CYCLE = re.compile(r"^[0-9]{10}$")
 SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[^\s;|&<>`$(){}\[\]\\\"']*$")
 SAFE_GFS_NAME = re.compile(r"^gfs\.t[0-9]{2}z\.pgrb2\.0p25\.f([0-9]{3})$")
@@ -60,6 +60,45 @@ def _safe_local_output_name(name: str) -> str:
 
 class HpcError(RuntimeError):
     pass
+
+
+def _validated_forcing_report(report, items):
+    """Require evidence for every requested file, not a truthy summary flag."""
+    def reject(codes=None):
+        safe = sorted({code for code in (codes or [])
+                       if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]*", code)})[:10]
+        raise HpcError("驱动资料语义校验未通过：" + ", ".join(safe or ["invalid_validation_contract"]))
+
+    if not isinstance(report, dict) or report.get("schema") != "wrf-forcing-set-validation-1":
+        reject()
+    files = report.get("files")
+    if report.get("valid") is not True or not isinstance(files, list) or not items or len(files) != len(items):
+        issues = []
+        for file in files if isinstance(files, list) else []:
+            if isinstance(file, dict) and isinstance(file.get("issues"), list):
+                issues.extend(file["issues"])
+        reject(issues)
+    expected = {Path(item["path"]).name: item["time"] for item in items}
+    seen = set()
+    for file in files:
+        if not isinstance(file, dict):
+            reject()
+        name, times = file.get("name"), file.get("valid_times")
+        if (not isinstance(name, str) or name not in expected or name in seen
+                or file.get("schema") != "wrf-forcing-validation-1"
+                or file.get("valid") is not True or file.get("issues") != []
+                or type(file.get("messages")) is not int or file["messages"] <= 0
+                or not isinstance(times, list) or expected[name] not in times):
+            reject()
+        if "decoded_bytes" in file or "file_bytes" in file:
+            if (type(file.get("decoded_bytes")) is not int
+                    or type(file.get("file_bytes")) is not int
+                    or file["decoded_bytes"] <= 0 or file["decoded_bytes"] != file["file_bytes"]):
+                reject()
+        seen.add(name)
+    if seen != set(expected):
+        reject()
+    return report
 
 
 class HpcCleanupBlockedError(HpcError):
@@ -115,6 +154,7 @@ class HpcClient:
             ("WRF_HPC_REMOTE_DIR", settings.hpc_remote_dir),
             ("WRF_HPC_GFS_DIR", settings.hpc_gfs_dir),
             ("WRF_HPC_EC_DIR", settings.hpc_ec_dir),
+            ("WRF_HPC_EC_0P1_DIR", settings.hpc_ec_0p1_dir),
             ("WRF_HPC_WPS_SOURCE_DIR", settings.hpc_wps_source_dir),
             ("WRF_HPC_WRF_SOURCE_DIR", settings.hpc_wrf_source_dir),
             ("WRF_HPC_GEOG_DATA_PATH", settings.hpc_geog_dir),
@@ -124,6 +164,14 @@ class HpcClient:
         ):
             if not SAFE_REMOTE_ROOT.fullmatch(value):
                 raise ValueError(f"{label} 包含不安全字符")
+
+        high_root = posixpath.normpath(settings.hpc_ec_0p1_dir)
+        if high_root != settings.hpc_ec_0p1_dir:
+            raise ValueError("IFS 0.1° 资料根目录不能包含相对跳转")
+        for other in (settings.hpc_gfs_dir, settings.hpc_ec_dir):
+            other = posixpath.normpath(other)
+            if high_root == other or high_root.startswith(other + "/") or other.startswith(high_root + "/"):
+                raise ValueError("IFS 0.1° 必须使用独立资料根目录，不能与现有资料池重叠")
 
     @property
     def target(self) -> str:
@@ -1674,20 +1722,21 @@ class HpcClient:
                 "hours": tuple(range(73)),
                 "total_files": 73,
             }
+        resolution = "0p1" if source == "ecmwf_0p1" else "0p25"
         return {
             "source": source,
-            "label": "ECMWF 0.25°",
-            "root": self.settings.hpc_ec_dir,
+            "label": "ECMWF IFS 0.1°" if source == "ecmwf_0p1" else "ECMWF 0.25°",
+            "root": self.settings.hpc_ec_0p1_dir if source=="ecmwf_0p1" else self.settings.hpc_ec_dir,
             "script": (f"{self.service_dir()}/download_ecmwf_00z.sh" if self.settings.hpc_runtime_release
                        else self.settings.hpc_ec_download_script),
             "local_script": Path(__file__).resolve().parent / "scripts" / "download_ecmwf_00z.sh",
-            "file_glob": "ecmwf.t00z.ifs.0p25.f???.grib2",
-            "file_name": lambda hour: f"ecmwf.t00z.ifs.0p25.f{hour:03d}.grib2",
-            "part_glob": "ecmwf.t00z.ifs.0p25.f???.grib2.part*",
+            "file_glob": f"ecmwf.t00z.ifs.{resolution}.f???.grib2",
+            "file_name": lambda hour: f"ecmwf.t00z.ifs.{resolution}.f{hour:03d}.grib2",
+            "part_glob": f"ecmwf.t00z.ifs.{resolution}.f???*.grib2.part*",
             "script_name": "download_ecmwf_00z.sh",
             "min_bytes": self.settings.hpc_ec_full_min_bytes,
             "poll_seconds": self.settings.hpc_ec_poll_seconds,
-            "product": EC_PRODUCT,
+            "product": "ecmwf-ifs-0p1" if source=="ecmwf_0p1" else EC_PRODUCT,
             "scope": EC_SCOPE,
             "hours": tuple(range(0, 73, 3)),
             "total_files": 25,
@@ -1700,6 +1749,8 @@ class HpcClient:
         if type(limit) is not int or not 1 <= limit <= 100 or (before is not None and (type(before) is not int or before < 0)):
             raise ValueError('Invalid attempt history page')
         root = self._forcing_settings(source)['root']
+        if source == 'ecmwf_0p1':
+            self._pool_queue_state(root)  # Refuse an aliased foreign product ledger.
         module = self.service_dir() + '/forcing_pool_queue.py'
         program = """import importlib.util,json,argparse
 spec=importlib.util.spec_from_file_location('history_queue',MODULE);q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
@@ -1714,7 +1765,7 @@ else:
         # Only structured diagnostics leave the server; never return curl stderr/URLs/paths.
         fields = {'id','file','attempt','started_at','finished_at','status','offset','bytes_before','bytes_after',
                   'execution_seconds','budget_seconds','min_speed_bps','low_speed_seconds','cause','curl_code',
-                  'http_status','next_retry_at','request','origin'}
+                  'http_status','next_retry_at','request','origin','component'}
         items = []
         for row in value.get('items',[]):
             item = {k:v for k,v in row.items() if k in fields}
@@ -1735,7 +1786,11 @@ else:
             state = json.loads(raw or "{}")
         except json.JSONDecodeError:
             return {}
-        return state if isinstance(state, dict) and isinstance(state.get("cycles"), dict) else {}
+        valid = isinstance(state, dict) and isinstance(state.get("cycles"), dict)
+        if (valid and str(root).rstrip("/") == self.settings.hpc_ec_0p1_dir
+                and state.get("source") != "ecmwf_0p1"):
+            raise HpcError("IFS 0.1° 资料池归属不一致，已停止读取；请管理员检查目录映射")
+        return state if valid else {}
 
     @staticmethod
     def _queue_cycle_details(state: dict[str, Any], cycle: str) -> dict[str, Any]:
@@ -1950,7 +2005,10 @@ else:
         source = self._normalize_forcing_source(data_source)
         pool = self.forcing_pool_items(source)[0]
         return sorted(
-            [str(item["cycle"]) for item in pool.get("cycles") or [] if item.get("complete")],
+            [str(item["cycle"]) for item in pool.get("cycles") or []
+             if item.get("complete") is True
+             and item.get("integrity_status") not in {"invalid", "failed"}
+             and item.get("failure_class") != "data_integrity"],
             reverse=True,
         )
 
@@ -1974,7 +2032,7 @@ else:
         except json.JSONDecodeError:
             manifest = {}
         candidates: dict[str, dict[str, Any]] = {}
-        if isinstance(manifest, dict) and manifest.get("cycle") == cycle:
+        if isinstance(manifest, dict) and manifest.get("cycle") == cycle and manifest.get("product", spec["product"]) == spec["product"] and manifest.get("provider", source) == source:
             for item in manifest.get("files", []):
                 entry = self._manifest_entry_forcing(source, item, cycle)
                 if entry is not None:
@@ -1990,6 +2048,20 @@ else:
                 "&& test \"$(tail -c 4 \"$name\" 2>/dev/null)\" = 7777; then "
                 "size=$(wc -c < \"$name\"); printf '%s|%s\\n' \"$name\" \"$size\"; fi; done"
             )
+            if source == "ecmwf_0p1":
+                # Trust only a paired atomic commit, never a lone GRIB component.
+                module = self.service_dir() + "/forcing_pool_queue.py"
+                program = """import argparse,importlib.util
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('ifs_pool',MODULE)
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+q=m.SplitEcmwfQueue(argparse.Namespace(source='ecmwf_0p1',root=ROOT,min_bytes=MINIMUM))
+for hour in HOURS:
+ path=q.file_path(CYCLE,hour)
+ if q.valid(path): print(path.name+'|'+str(path.stat().st_size))
+"""
+                program = 'MODULE,ROOT,MINIMUM,HOURS,CYCLE = ' + repr((module,spec['root'],int(spec['min_bytes']),requested,cycle)) + '\n' + program
+                command = "python3 -B -c " + shlex.quote(program)
             for line in self.run(command, timeout=300).splitlines():
                 name, separator, size_text = line.partition("|")
                 if not separator or name not in expected:
@@ -2079,6 +2151,10 @@ else:
 
     def validate_forcing_semantics(self, task_id, data_source, cycle, hours, bounds):
         self._assert_cycle(cycle)
+        if (not isinstance(hours, (list, tuple)) or not hours
+                or any(type(hour) is not int or not 0 <= hour <= 72 for hour in hours)
+                or len(set(hours)) != len(hours)):
+            raise ValueError("驱动资料语义校验需要明确且不重复的时次。")
         source = self._normalize_forcing_source(data_source)
         spec = self._forcing_settings(source)
         script_dir = self.service_dir(task_id)
@@ -2090,26 +2166,26 @@ else:
         if isinstance(p_top_pa, list): p_top_pa = p_top_pa[0]
         program = (
             "import sys,json,datetime; sys.path.insert(0,sys.argv[1]); from validate_forcing import validate; from pathlib import Path; "
-            "items=json.loads(sys.argv[2]); reports=[validate(Path(i['path']),i['time'],i['bounds'],i['p_top_pa']) for i in items]; "
+            "items=json.loads(sys.argv[2]); reports=[validate(Path(i['path']),i['time'],i['bounds'],i['p_top_pa'],**({'expected_spacing':i['grid_spacing']} if i.get('grid_spacing') is not None else {})) for i in items]; "
             "print(json.dumps({'schema':'wrf-forcing-set-validation-1','valid':all(i['valid'] for i in reports),'files':reports}))"
         )
         start = datetime.strptime(cycle, "%Y%m%d%H")
         items = [{"path": f"{spec['root']}/{cycle}/{spec['file_name'](int(hour))}",
                   "time": (start + timedelta(hours=int(hour))).strftime("%Y%m%d%H%M"), "bounds": bounds,
-                  "p_top_pa": p_top_pa or 5000} for hour in hours]
+                  "p_top_pa": p_top_pa or 5000, "grid_spacing": 0.1 if source == "ecmwf_0p1" else None} for hour in hours]
         command = (". " + shlex.quote(posixpath.dirname(script_dir) + "/runtime.env") + " >/dev/null 2>&1 && "
                    + " ".join(shlex.quote(v) for v in (self.settings.hpc_runtime_python, "-B", "-c", program, script_dir, json.dumps(items))))
-        report = json.loads(self.run(command, timeout=1800))
-        if report.get("schema") != "wrf-forcing-set-validation-1" or not report.get("valid"):
-            issues = sorted({code for item in report.get("files", []) for code in item.get("issues", [])})
-            raise HpcError("驱动资料语义校验未通过：" + ", ".join(issues or ["invalid_validation_contract"]))
-        return report
+        try:
+            report = json.loads(self.run(command, timeout=1800))
+        except (ValueError, TypeError) as exc:
+            raise HpcError("驱动资料语义校验未通过：invalid_validation_contract") from exc
+        return _validated_forcing_report(report, items)
 
     def _manifest_entry_forcing(self, data_source: str, item: Any, cycle: str) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
         name = str(item.get("name") or "")
-        matcher = SAFE_GFS_NAME if data_source == "gfs" else SAFE_EC_NAME
+        matcher = SAFE_GFS_NAME if data_source == "gfs" else (re.compile(r"ecmwf\.t00z\.ifs\.0p1\.f([0-9]{3})\.grib2") if data_source=="ecmwf_0p1" else SAFE_EC_NAME)
         match = matcher.fullmatch(name)
         digest = str(item.get("sha256") or "").lower()
         try:
@@ -2170,6 +2246,7 @@ else:
             f"mkdir -p {self._quote_remote(spec['root'])} {self._quote_remote(log_dir)} || "
             f"{{ printf 'ERROR|ecmwf_storage_io_error'; exit 0; }}; "
             f"env WRF_EC_DATA_ROOT={self._quote_remote(spec['root'])} "
+            f"WRF_EC_PRODUCT_SOURCE={source} "
             f"WRF_POOL_RETRY_MAX_ATTEMPTS={self.settings.hpc_pool_retry_max_attempts} "
             f"WRF_POOL_RETRY_MAX_SECONDS={self.settings.hpc_pool_retry_max_seconds} "
             f"WRF_POOL_PUBLISH_PROBE_SECONDS={self.settings.hpc_pool_publish_probe_seconds} "
@@ -2284,7 +2361,7 @@ else:
                 download_message = parts[5].strip() if len(parts) == 6 else ""
             queue_details = self._queue_cycle_details(queue_state, cycle)
             effective_status = status
-            if status != "ready" and queue_details.get("queue_status"):
+            if status != "ready" and queue_details.get("queue_status") not in {None, "", "ready"}:
                 effective_status = str(queue_details["queue_status"])
             if (
                 effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
@@ -2450,6 +2527,8 @@ else:
             f"complete=1; for hour in {expected_hours_shell}; do fh=$(printf '%03d' \"$hour\"); "
             "test -s \"$dir/ecmwf.t00z.ifs.0p25.f${fh}.grib2\" || complete=0; done; "
         )
+        if source == "ecmwf_0p1":
+            expected_files_check = expected_files_check.replace("0p25", "0p1").replace(" || complete=0;", " && test -s \"$dir/.components/${fh}/commit.json\" || complete=0;")
         output = self.run(
             f"cd {self._quote_remote(root)} 2>/dev/null || exit 0; "
             "root=$(pwd -P); printf 'ROOT|%s\\n' \"$root\"; "
@@ -2489,7 +2568,7 @@ else:
             cycle, status, count, size, last, partial_count, partial_size, active_downloads, download_message = parts
             queue_details = self._queue_cycle_details(queue_state, cycle)
             effective_status = status
-            if status != "ready" and queue_details.get("queue_status"):
+            if status != "ready" and queue_details.get("queue_status") not in {None, "", "ready"}:
                 effective_status = str(queue_details["queue_status"])
             if (
                 effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
@@ -2817,7 +2896,8 @@ else:
             "WRF_FAILURE_FILE": task_dir + "/failure.json",
             "WRF_NONINTERACTIVE": "true",
             "WRF_GFS_DATA_ROOT": self.settings.hpc_gfs_dir,
-            "WRF_EC_CACHE_ROOT": self.settings.hpc_ec_dir,
+            "WRF_EC_CACHE_ROOT": self._forcing_settings(source)["root"] if source!="gfs" else self.settings.hpc_ec_dir,
+            "WRF_EC_RESOLUTION": "0p1" if source=="ecmwf_0p1" else "0p25",
             "WRF_EC_GRIB_FILTER": script_dir + "/ecmwf_to_wps.filter",
             "WRF_GFS_MOUNT": self.settings.hpc_gfs_mount,
         }

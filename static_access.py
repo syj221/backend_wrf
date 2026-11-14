@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 
-TASK_ID = re.compile(r"^(?:wrf_(?:gfs|ecmwf)|ds)_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
+TASK_ID = re.compile(r"^(?:wrf_(?:gfs|ecmwf|ecmwf_0p1)|ds)_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 
 
 def allow_run_asset(path: str, user: dict[str, Any], lookup: Callable[[str], dict | None]) -> bool:

@@ -28,7 +28,9 @@ class GuidanceTest(unittest.TestCase):
         payload={"configuration_profile":"wrf-ordinary-ui-2","data_source":"gfs","start_time":"2026-10-07T03:00:00Z","end_time":"2026-10-07T04:00:00Z","spinup":{"mode":"custom","hours":0}}
         pool={"pool_items":[{"provider":"gfs","cycles":[{"cycle":"2026100700","complete":False,"status":"partial","available_hours":list(range(8))}]}]}
         ready=recommendations(payload,{},pool,datetime(2026,10,7,12,tzinfo=timezone.utc))["data_window"]
-        self.assertEqual(ready["status"],"ready")
+        self.assertEqual(ready["status"],"unknown")
+        self.assertEqual(ready["availability_status"],"present")
+        self.assertEqual(ready["integrity_status"],"unverified")
         self.assertEqual(ready["missing_hours"],[])
         pool["pool_items"][0]["cycles"][0]["available_hours"]=[0,1,2]
         missing=recommendations(payload,{},pool,datetime(2026,10,7,12,tzinfo=timezone.utc))["data_window"]

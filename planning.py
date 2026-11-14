@@ -28,7 +28,7 @@ class PlanningAssessRequest(BaseModel):
     center_confirmed: bool = False
     start_time: datetime | None = None
     end_time: datetime | None = None
-    data_source: Literal["gfs", "ecmwf"] | None = None
+    data_source: Literal["gfs", "ecmwf", "ecmwf_0p1"] | None = None
     forecast_interval_hours: Literal[1, 3, 6] | None = None
     history_interval_minutes: Literal[10, 30, 60, 180, 360] | None = None
     spinup: SpinupConfig = Field(default_factory=SpinupConfig)

@@ -167,6 +167,13 @@ class RuntimeDeploymentTest(TestCase):
             self.resume()
         self.assert_unchanged()
 
+    def test_staged_resume_installs_without_switching_current(self):
+        self.manifest['activation_policy'] = 'staged'
+        self.seal()
+        self.assertEqual(self.resume()['status'], 'installed')
+        self.assertEqual((self.root / 'current').resolve(), self.old)
+        self.assertTrue((self.root / 'releases' / 'release-fixture').is_dir())
+
     def test_resume_revalidates_all_gates_then_reseals_before_switch(self):
         self.seal()
         self.assertTrue(self.manifest['validation']['complete'])

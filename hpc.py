@@ -16,7 +16,7 @@ from config import Settings
 from schemas import FIXED_RUNTIME_PROFILE, FIXED_SPINUP_HOURS, normalize_task_request
 
 
-SAFE_TASK_ID = re.compile(r"^wrf_(?:(?:gfs|ecmwf)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
+SAFE_TASK_ID = re.compile(r"^wrf_(?:(?:gfs|ecmwf|ecmwf_0p1)_)?[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 SAFE_REMOTE_ROOT = re.compile(r"^(?:~|/)[^\s;|&<>`$(){}\[\]\\\"']*$")
 SAFE_GFS_NAME = re.compile(r"^gfs\.t(?P<cycle_hour>[0-9]{2})z\.pgrb2\.0p25\.f(?P<forecast_hour>[0-9]{3})$")
 SAFE_EC_NAME = re.compile(r"^ecmwf\.t(?P<cycle_hour>[0-9]{2})z\.ifs\.0p25\.f(?P<forecast_hour>[0-9]{3})\.grib2$")
@@ -477,7 +477,7 @@ def build_task_config(task_id: str, request: dict[str, Any], cycle: str, hours: 
     from guidance import RULESET
     request = normalize_task_request(WrfTaskCreate.model_validate(request).model_dump(mode="json"))
     data_source = str(request.get("data_source") or "gfs").lower()
-    if data_source not in {"gfs", "ecmwf"}:
+    if data_source not in {"gfs", "ecmwf", "ecmwf_0p1"}:
         raise ValueError("数据源必须是 gfs 或 ecmwf")
     cache_key = "gfs_cache" if data_source == "gfs" else "ec_cache"
     cache_prefix = "gfs" if data_source == "gfs" else "ec"
@@ -566,6 +566,7 @@ def _runtime_environment(config: dict[str, Any]) -> dict[str, str]:
         "WRF_TASK_TAG": config["output"]["task_tag"],
         "WRF_REQUESTED_RUNTIME_PROFILE": config.get("runtime_profile", "cpu"),
         "WRF_DATA_SOURCE": "gfs" if data_source == "gfs" else "ec",
+        "WRF_EC_RESOLUTION": "0p1" if data_source=="ecmwf_0p1" else "0p25",
         "WRF_NONINTERACTIVE": "true",
         "WRF_MAX_DOM": config["max_dom"],
         "WRF_START_YEAR": time_range["start_year"],
@@ -666,7 +667,7 @@ def _write_expected_forcing_index(
     by_hour: dict[int, tuple[str, int, str]] = {}
     for item in entries:
         name = str(item.get("name") or "")
-        matcher = SAFE_GFS_NAME if data_source == "gfs" else SAFE_EC_NAME
+        matcher = SAFE_GFS_NAME if data_source == "gfs" else (re.compile(r"ecmwf\.t(?P<cycle_hour>[0-9]{2})z\.ifs\.0p1\.f(?P<forecast_hour>[0-9]{3})\.grib2") if data_source=="ecmwf_0p1" else SAFE_EC_NAME)
         match = matcher.fullmatch(name)
         digest = str(item.get("sha256") or "").lower()
         try:

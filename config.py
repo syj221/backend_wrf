@@ -124,6 +124,7 @@ class Settings:
     hpc_ec_dir: str = os.getenv(
         "WRF_HPC_EC_DIR", f"{HPC_STORAGE_ALIAS}/WRFwork/DATA/ECMWF"
     ).strip().rstrip("/")
+    hpc_ec_0p1_dir: str = os.getenv("WRF_HPC_EC_0P1_DIR", f"{HPC_STORAGE_ALIAS}/WRF_WORKBENCH/forcing/ecmwf_0p1").strip().rstrip("/")
     hpc_ec_download_script: str = os.getenv(
         "WRF_HPC_EC_DOWNLOAD_SCRIPT",
         f"{HPC_STORAGE_ALIAS}/WRFwork/RUNTIME/backend_wrf_service/download_ecmwf_00z.sh",

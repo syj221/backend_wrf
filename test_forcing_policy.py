@@ -62,14 +62,14 @@ class ForcingPolicyTest(unittest.TestCase):
             self.addCleanup(store.close)
             manager=Mock()
             client=SimpleNamespace(run=Mock(return_value="*/10 * * * * wrf_server_cron.sh"))
-            settings=SimpleNamespace(hpc_workbench_data_root="/workbench",hpc_gfs_dir="/workbench/forcing/gfs",hpc_ec_dir="/workbench/forcing/ecmwf",hpc_gfs_prefetch_enabled=False)
+            settings=SimpleNamespace(hpc_workbench_data_root="/workbench",hpc_gfs_dir="/workbench/forcing/gfs",hpc_ec_dir="/workbench/forcing/ecmwf",hpc_ec_0p1_dir="/workbench/forcing/ecmwf_0p1",hpc_gfs_prefetch_enabled=False)
             holds={"gfs":["2026100900"],"ecmwf":[]}
             with self.assertRaisesRegex(ValueError,"旧 WRF cron"):
                 policy_update(store,manager,client,settings,version=0,enabled=True,auto_cleanup=False,held_cycles=holds)
             client.run.return_value="*/15 * * * * unrelated_job"
             saved=policy_update(store,manager,client,settings,version=0,enabled=True,auto_cleanup=True,held_cycles=holds)
             self.assertEqual(saved["version"],1)
-            self.assertEqual(saved["held_cycles"],holds)
+            self.assertEqual(saved["held_cycles"],{**holds,"ecmwf_0p1":[]})
             manager.set_forcing_policy.assert_called_once()
             with self.assertRaisesRegex(ValueError,"其他操作"):
                 policy_update(store,manager,client,settings,version=0,enabled=False,auto_cleanup=False,held_cycles=holds)

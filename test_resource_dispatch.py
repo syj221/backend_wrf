@@ -34,6 +34,22 @@ class ResourceDispatchTest(TestCase):
             self.manager._health=original
         self.assertEqual(self.store.get('0')['status'],'queued');self.threads.return_value.start.assert_not_called()
 
+    def test_high_resolution_wps_floor_queues_without_changing_grid(self):
+        request = tree_request()
+        request.update(data_source='ecmwf_0p1', forecast_interval_hours=3)
+        self.store.update('0', request=request)
+        self.manager._health['memory_available_mb'] = 6144
+        self.assertFalse(self.manager._dispatch('0'))
+        self.assertIn('内存', self.store.get('0')['runtime']['resource_wait_reason'])
+        self.assertTrue(self.manager._dispatch('1'))  # Existing 0.25-degree floor is unchanged.
+        self.manager._task_threads.pop('1')
+        self.store.update('1', status='succeeded')
+        self.manager._health['memory_available_mb'] = 8192
+        self.assertTrue(self.manager._dispatch('0'))
+        task = self.store.get('0')
+        self.assertEqual(task['runtime']['resource_budget']['memory_bytes'], 6 * 1024**3)
+        self.assertEqual(task['request']['domains'], request['domains'])
+
     def test_old_pinned_attempt_serializes_with_new_tasks(self):
         self.store.update('0',runtime={'release_id':'old'})
         self.assertTrue(self.manager._dispatch('0'));self.assertFalse(self.manager._dispatch('1'))

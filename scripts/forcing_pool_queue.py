@@ -182,7 +182,7 @@ class PoolQueue:
 
     def expected_hours(self) -> Tuple[int, ...]:
         """Return the forecast fields actually published by this provider."""
-        return ECMWF_HOURS if self.source == "ecmwf" else HOURS
+        return HOURS if self.source == "gfs" else ECMWF_HOURS
 
     def file_name(self, hour: int) -> str:
         if self.source == "gfs":
@@ -352,7 +352,7 @@ class PoolQueue:
         cycle = safe_cycle(cycle)
         if reference and not re.fullmatch(r"forcing_[a-f0-9]{32}",reference):
             raise ValueError("invalid download reference")
-        if self.source == "ecmwf":
+        if self.source in {"ecmwf", "ecmwf_0p1"}:
             invalid = sorted(set(hours) - set(self.expected_hours()))
             if invalid:
                 raise ValueError("ECMWF Open Data 仅提供 3 小时时次：" + ",".join(f"f{hour:03d}" for hour in invalid))
@@ -366,7 +366,7 @@ class PoolQueue:
             # Older queue versions incorrectly created hourly ECMWF entries.
             # Remove them from scheduling so an unavailable 1-hour field can
             # never hold a valid 3-hour cycle in the failed state.
-            if self.source == "ecmwf":
+            if self.source in {"ecmwf", "ecmwf_0p1"}:
                 for key, entry in files.items():
                     if key not in expected and isinstance(entry, dict):
                         entry.update({
@@ -911,7 +911,7 @@ class PoolQueue:
             files.append({"name": path.name, "forecast_hour": hour, "size": path.stat().st_size, "sha256": self.digest(path)})
         manifest = {
             "provider": self.source,
-            "product": "gfs-0p25-global" if self.source == "gfs" else "ecmwf-ifs-0p25",
+            "product": "gfs-0p25-global" if self.source == "gfs" else ("ecmwf-ifs-0p1" if self.source=="ecmwf_0p1" else "ecmwf-ifs-0p25"),
             "scope": "global", "cycle": cycle, "forecast_hours": list(expected_hours), "complete": True,
             "files": files, "updated_at": utc_now(), "managed_by": "backend_wrf_remote_pool",
         }
@@ -992,7 +992,7 @@ class PoolQueue:
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("enqueue", "worker", "forget", "cleanup", "snapshot", "release", "expire-prefetch"))
-    parser.add_argument("--source", choices=("gfs", "ecmwf"), required=True)
+    parser.add_argument("--source", choices=("gfs", "ecmwf", "ecmwf_0p1"), required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--cycle")
     parser.add_argument("--hours")
@@ -1016,9 +1016,158 @@ def arguments() -> argparse.Namespace:
     return args
 
 
+class SplitEcmwfQueue(PoolQueue):
+    """A 0.1-degree forecast step commits only after both level types exist.
+
+    Component queues reuse the established retry and history implementation.
+    Their state and payloads stay inside the logical cycle, so its existing
+    cycle lock and directory retirement protect every component together.
+    """
+    def file_name(self, hour):
+        return f"ecmwf.t00z.ifs.0p1.f{hour:03d}.grib2"
+
+    def valid(self, path):
+        # A GRIB sentinel cannot distinguish a lone SFC file from the pair.
+        # Bind readiness to the atomic assembly record and exact file identity.
+        if path.is_symlink() or not super().valid(path):
+            return False
+        match=re.fullmatch(r"ecmwf\.t00z\.ifs\.0p1\.f([0-9]{3})\.grib2",path.name)
+        if not match:
+            return False
+        commit=read_json(path.parent/'.components'/match.group(1)/'commit.json')
+        info=path.stat()
+        components=commit.get('components',{})
+        return (commit.get('product')=='ecmwf-ifs-0p1' and commit.get('cycle')==path.parent.name
+                and commit.get('name')==path.name and set(components)=={'sfc','pl'}
+                and all(isinstance(v,dict) and re.fullmatch(r'[0-9a-f]{64}',str(v.get('sha256','')))
+                        and type(v.get('bytes')) is int and v['bytes']>0 for v in components.values())
+                and sum(v['bytes'] for v in components.values())==info.st_size
+                and [commit.get(k) for k in ('device','inode','bytes','mtime_ns')]
+                    ==[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns])
+
+    def component_name(self, hour, component):
+        return f"ecmwf.t00z.ifs.0p1.f{hour:03d}.{component}.grib2"
+
+    def component_url(self, cycle, hour, component):
+        if component not in ('sfc','pl'):
+            raise ValueError('Unknown IFS component')
+        if self.args.ec_template:
+            if '{levtype}' not in self.args.ec_template or '/0p1/' not in self.args.ec_template:
+                raise ValueError('0.1-degree template must explicitly bind 0p1 and levtype')
+            return (self.args.ec_template.replace('{levtype}',component).replace('{cycle}',cycle)
+                    .replace('{date}',cycle[:8]).replace('{hour}',cycle[8:])
+                    .replace('{fh}',f'{hour:03d}').replace('{step}',str(hour)))
+        return (f'https://data.ecmwf.int/forecasts/{cycle[:8]}/{cycle[8:]}z/ifs/0p1/oper/'
+                f'{cycle}0000-{hour}h-oper-fc-{component}.grib2')
+
+    def url(self, cycle, hour):
+        return self.component_url(cycle,hour,'sfc')
+
+    def part_size(self, cycle, hour):
+        return sum(p.stat().st_size for p in (self.root/cycle).glob(
+            f'ecmwf.t00z.ifs.0p1.f{hour:03d}.*.grib2.part') if p.is_file())
+
+    def probe_published(self, cycle):
+        for component in ('sfc','pl'):
+            path=self.root/f'.publish-probe-{cycle}-{component}.part'
+            command=['curl','--fail','--location','--range','0-16383','--connect-timeout','20',
+                     '--max-time','45','--silent','--show-error','--output',str(path),
+                     self.component_url(cycle,72,component)]
+            result=self.run_curl(command,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+                                 universal_newlines=True,check=False,pass_fds=self.worker_fds)
+            try:available=result.returncode==0 and path.read_bytes().startswith(b'GRIB')
+            except OSError:available=False
+            try:path.unlink()
+            except FileNotFoundError:pass
+            if not available:
+                self._mark_publication(cycle,'waiting_publish',epoch_now()+self.args.publish_probe_seconds,
+                                       result.stderr.strip()[-200:] or f'0p1 f072 {component} 尚未发布')
+                return False
+        self._mark_publication(cycle,'published')
+        return True
+
+    def _download_one_locked(self, cycle, hour):
+        output=self.file_path(cycle,hour)
+        if self.valid(output):
+            self._set_entry(cycle,hour,{'status':'ready','bytes':output.stat().st_size,'retry_at':0})
+            return
+        if output.parent.is_symlink():
+            raise ValueError('IFS cycle directory cannot be a symbolic link')
+        output.parent.mkdir(parents=True,exist_ok=True)
+        for name in (self.file_name(hour), self.component_name(hour,'sfc'), self.component_name(hour,'pl')):
+            for suffix in ('', '.part', '.part.headers', '.assembling'):
+                candidate=output.parent/(name+suffix)
+                if candidate.exists() or candidate.is_symlink():
+                    info=candidate.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1:
+                        raise ValueError('Unsafe IFS component path')
+        paths=[];components={}
+        for kind in ('sfc','pl'):
+            queue=_EcmwfComponentQueue(self,cycle,hour,kind)
+            queue.worker_fds=self.worker_fds
+            queue.enqueue(cycle,[hour],'task')
+            queue._mark_publication(cycle,'published')
+            self._set_entry(cycle,hour,{'status':'downloading','current_file':queue.file_name(hour),
+                'active_component':kind,'retry_at':0,'error':None})
+            picked=queue._pick_next()
+            path=queue.file_path(cycle,hour)
+            if picked and picked==(cycle,hour):queue._download_one_locked(cycle,hour)
+            entry=queue.load_state()['cycles'][cycle]['files'][f'{hour:03d}']
+            if entry.get('status')!='ready' or not queue.valid(path):
+                # Only scheduling/diagnostic fields propagate. Logical task and
+                # prefetch references are never replaced by component state.
+                fields=('status','attempts','bytes','current_file','retry_at','terminal_retry_at',
+                        'retryable','failure_class','failed_at','error','http_status','no_progress_attempts')
+                values={k:entry[k] for k in fields if k in entry}
+                if values.get('status')=='ready':values['status']='queued'
+                self._set_entry(cycle,hour,values)
+                return
+            paths.append(path)
+            components[kind]={'sha256':entry.get('sha256') or self.digest(path),'bytes':path.stat().st_size}
+        temporary=Path(str(output)+'.assembling')
+        descriptor=os.open(str(temporary),os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        with os.fdopen(descriptor,'wb') as stream:
+            for path in paths:
+                with path.open('rb') as source:shutil.copyfileobj(source,stream,1024*1024)
+            stream.flush();os.fsync(stream.fileno())
+        if not PoolQueue.valid(self,temporary):raise RuntimeError('IFS component assembly failed')
+        digest=self.digest(temporary)
+        os.replace(temporary,output)
+        info=output.stat()
+        atomic_json(output.parent/'.components'/f'{hour:03d}'/'commit.json',
+            {'product':'ecmwf-ifs-0p1','cycle':cycle,'name':output.name,'device':info.st_dev,
+             'inode':info.st_ino,'bytes':info.st_size,'mtime_ns':info.st_mtime_ns,
+             'sha256':digest,'components':components})
+        self._set_entry(cycle,hour,{'status':'ready','bytes':output.stat().st_size,
+            'sha256':digest,'components':components,'active_component':None,
+            'retry_at':0,'terminal_retry_at':0,'failure_class':'','error':None})
+        # Raw complete components are redundant after the atomic logical commit.
+        # Interrupted components and every historical attempt remain retained.
+        for path in paths:path.unlink()
+
+
+class _EcmwfComponentQueue(PoolQueue):
+    def __init__(self,parent,cycle,hour,component):
+        for path in (parent.root/cycle, parent.root/cycle/'.components', parent.root/cycle/'.components'/f'{hour:03d}', parent.root/cycle/'.components'/f'{hour:03d}'/component):
+            if path.is_symlink():
+                raise ValueError('IFS component state cannot be a symbolic link')
+        values=dict(vars(parent.args));values.update(source='ecmwf',
+            root=str(parent.root/cycle/'.components'/f'{hour:03d}'/component),
+            ec_template=parent.component_url(cycle,hour,component))
+        super().__init__(argparse.Namespace(**values))
+        self.parent,self.logical_cycle,self.component=parent,cycle,component
+
+    def file_name(self,hour):return self.parent.component_name(hour,self.component)
+
+    def file_path(self,cycle,hour):return self.parent.root/cycle/self.file_name(hour)
+
+    def record_attempt(self,cycle,event):
+        return self.parent.record_attempt(self.logical_cycle,dict(event,component=self.component))
+
+
 def main() -> int:
     args = arguments()
-    queue = PoolQueue(args)
+    queue = (SplitEcmwfQueue if args.source=='ecmwf_0p1' else PoolQueue)(args)
     if args.action == "enqueue":
         queue.enqueue(args.cycle, parse_hours(args.hours), args.priority,args.reference)
         print(f"QUEUED|{args.cycle}|{args.priority}")

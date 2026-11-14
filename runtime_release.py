@@ -212,7 +212,11 @@ def mpi_budget(request, configured):
 def compute_budget(request, configured):
     budget = mpi_budget(request, configured)
     cells = sum(int(d['e_we']) * int(d['e_sn']) for d in request.get('domains', [])) * int(request.get('vertical_levels', 88))
-    return {**budget, 'memory_bytes': max(2 * 1024**3, cells * 1200),
+    # Global 0.1-degree ungrib exceeds the old small-domain 2 GiB floor.
+    # This admission reservation does not change scientific parameters or
+    # rewrite reservations of attempts that are already running.
+    floor = (6 if str(request.get('data_source', '')).lower() == 'ecmwf_0p1' else 2) * 1024**3
+    return {**budget, 'memory_bytes': max(floor, cells * 1200),
             'basis': 'conservative_admission_budget_v1'}
 
 

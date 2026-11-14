@@ -14,13 +14,14 @@ CYCLE = re.compile(r"^[0-9]{8}00$")
 def policy_update(store, manager, client, settings, *, version, enabled, auto_cleanup, held_cycles):
     if auto_cleanup and not enabled:
         raise ValueError("自动清理只能随自动预取启用")
-    if set(held_cycles) != {"gfs", "ecmwf"}:
+    if set(held_cycles) not in ({"gfs", "ecmwf"}, {"gfs", "ecmwf", "ecmwf_0p1"}):
         raise ValueError("必须明确列出 GFS、ECMWF 两源保留周期")
+    held_cycles = {**held_cycles, "ecmwf_0p1": held_cycles.get("ecmwf_0p1", [])}
     for source, cycles in held_cycles.items():
         if not isinstance(cycles, list) or len(cycles) > 100 or len(set(cycles)) != len(cycles) or any(not isinstance(x,str) or not CYCLE.fullmatch(x) for x in cycles):
             raise ValueError(f"{source} 显式保留周期格式无效")
     if enabled:
-        if not settings.hpc_workbench_data_root or not all(str(getattr(settings,name)).startswith(settings.hpc_workbench_data_root.rstrip("/")+"/forcing/") for name in ("hpc_gfs_dir","hpc_ec_dir")):
+        if not settings.hpc_workbench_data_root or not all(str(getattr(settings,name)).startswith(settings.hpc_workbench_data_root.rstrip("/")+"/forcing/") for name in ("hpc_gfs_dir","hpc_ec_dir","hpc_ec_0p1_dir")):
             raise ValueError("GFS、ECMWF 必须位于独立普通 WRF 资料池")
         lines = client.run("crontab -l", timeout=20).splitlines()
         if any("wrf_server_cron.sh" in line and line.strip() and not line.lstrip().startswith("#") for line in lines):
@@ -32,7 +33,7 @@ def policy_update(store, manager, client, settings, *, version, enabled, auto_cl
 
 
 def request_download(store, client, actor, source, cycle, first, last, key=None):
-    if source not in {"gfs","ecmwf"} or not CYCLE.fullmatch(cycle):
+    if source not in {"gfs","ecmwf","ecmwf_0p1"} or not CYCLE.fullmatch(cycle):
         raise ValueError("仅支持 GFS/ECMWF 的 00 UTC 资料周期")
     if type(first) is not int or type(last) is not int or first<0 or last>72 or first>last:
         raise ValueError("时次范围必须位于 f000–f072")

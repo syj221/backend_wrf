@@ -100,7 +100,7 @@ class ForcingCleanupTest(unittest.TestCase):
         self.addCleanup(release.set)
         def enable(*args,**kwargs):
             release.wait(2)
-            self.assertEqual(kwargs['held_cycles'],{'gfs':[],'ecmwf':[]})
+            self.assertEqual(kwargs['held_cycles'],{'gfs':[],'ecmwf':[],'ecmwf_0p1':[]})
         with patch('forcing_policy.policy_update',side_effect=enable) as update:
             started=time.monotonic();operation=self.service.refresh_async('admin',3)
             self.assertLess(time.monotonic()-started,.3)

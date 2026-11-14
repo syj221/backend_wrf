@@ -808,7 +808,7 @@ step1_forecast_data_preparation() {
         data_hour="${WRF_EC_HOUR:-}"
         forecast_hours="${WRF_EC_FORECAST_HOURS:-}"
         file_prefix="ecmwf.t"
-        file_suffix=".ifs.0p25.f"
+        file_suffix=".ifs.${WRF_EC_RESOLUTION:-0p25}.f"
         file_extension=".grib2"
     else
         data_root="${WRF_GFS_DATA_ROOT:-${USER_HOME}/Data/gfsdata}"
@@ -1202,7 +1202,7 @@ WPS_EOF
         local data_date data_hour forecast_hours data_root file_prefix file_suffix file_extension
         if [ "$forecast_provider" = "ec" ]; then
             data_date="${WRF_EC_DATE:-}"; data_hour="${WRF_EC_HOUR:-}"; forecast_hours="${WRF_EC_FORECAST_HOURS:-}"
-            data_root="${WRF_EC_CACHE_ROOT:-${USER_HOME}/Data/ecdata}"; file_prefix="ecmwf.t"; file_suffix=".ifs.0p25.f"; file_extension=".grib2"
+            data_root="${WRF_EC_CACHE_ROOT:-${USER_HOME}/Data/ecdata}"; file_prefix="ecmwf.t"; file_suffix=".ifs.${WRF_EC_RESOLUTION:-0p25}.f"; file_extension=".grib2"
         else
             data_date="${WRF_GFS_DATE:-}"; data_hour="${WRF_GFS_HOUR:-}"; forecast_hours="${WRF_GFS_FORECAST_HOURS:-}"
             data_root="${WRF_GFS_DATA_ROOT:-${USER_HOME}/Data/gfsdata}"; file_prefix="gfs.t"; file_suffix=".pgrb2.0p25.f"; file_extension=""

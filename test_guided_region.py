@@ -54,7 +54,10 @@ class GuidedRegionTest(unittest.TestCase):
         self.assertEqual(len(options), 3)
         for option in options:
             self.assertEqual(option['data_window']['cycle'], '2026101900')
-            self.assertEqual(option['data_window']['status'], 'ready')
+            self.assertEqual(option['data_window']['status'], 'unknown')
+            self.assertEqual(option['data_window']['availability_status'], 'present')
+            self.assertEqual(option['data_window']['integrity_status'], 'unverified')
+            self.assertIn('完整性待', option['reason'])
             self.assertEqual(option['data_window']['nominal_cycle']['status'], 'waiting_publish')
             self.assertIn('已下载', option['reason'])
             self.assertIn('2026101900', option['reason'])

@@ -174,7 +174,7 @@ class WrfTaskCreate(BaseModel):
     recovery_policy: Literal["confirm"] = "confirm"
     publish_to_catalog: bool = Field(default=True, strict=True)
     time_step_seconds: int | None = Field(default=None, ge=1)
-    data_source: Literal["gfs", "ecmwf", "ec"] = "gfs"
+    data_source: Literal["gfs", "ecmwf", "ecmwf_0p1", "ec"] = "gfs"
     start_time: datetime
     end_time: datetime
     center: Center
@@ -250,7 +250,7 @@ class WrfTaskCreate(BaseModel):
                 raise ValueError("逐域城市冠层方案仅支持 0 或 1")
             if 1 in self.physics.sf_urban_physics_by_domain and self.physics.sf_surface_physics not in {2, 4}:
                 raise ValueError("逐域 UCM 城市冠层仅支持 Noah 或 Noah-MP 陆面方案")
-        if self.data_source == "ecmwf" and self.forecast_interval_hours != 3:
+        if self.data_source in {"ecmwf","ecmwf_0p1"} and self.forecast_interval_hours != 3:
             raise ValueError("ECMWF 全球开放资料为 3 小时边界场，请选择 3 小时间隔")
         hours = configured_spinup_hours(self.model_dump())
         if hours % self.forecast_interval_hours:

@@ -1,0 +1,2 @@
+# Native GRIB integration tests only; do not install into the service runtime.
+eccodes==2.50.0

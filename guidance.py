@@ -74,10 +74,12 @@ def configuration_rules(request, complete=False, effective=None):
 def recommendations(request, health, pool=None, now=None):
     from schemas import configured_spinup_hours, configured_vertical_levels
     from gfs import boundary_buffer_hours
+    from forcing_readiness import observe_cycle, coverage_label
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     source = str(request.get("data_source") or "gfs").lower()
-    interval = 3 if source == "ecmwf" else int(request.get("forecast_interval_hours") or 1)
-    aligned = datetime.fromtimestamp(math.ceil(now.timestamp() / (interval * 3600)) * interval * 3600, timezone.utc)
+    interval = 3 if source in {"ecmwf", "ecmwf_0p1"} else int(request.get("forecast_interval_hours") or 1)
+    from configuration_profile import aligned_future_start
+    aligned = aligned_future_start(now, interval)
     def parse(value, fallback):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc) if value else fallback
     start = parse(request.get("start_time"), aligned)
@@ -112,25 +114,17 @@ def recommendations(request, health, pool=None, now=None):
         if bounds is None:
             return {"cycle": key, "status": "unavailable", "missing_hours": None}
         match = next((c for c in cycles if c.get("cycle") == key), None)
-        missing = None
-        status = "unknown"
-        if match:
-            available = match.get("available_hours")
-            missing = [h for h in bounds[2] if h not in available] if isinstance(available, list) else None
-            status = "ready" if missing == [] or (missing is None and match.get("complete")) else "waiting_publish" if match.get("status") == "waiting_publish" else "needs_download"
-        elif pool is not None and pool.get("status") != "unavailable":
-            status = "needs_download"
-        return {"cycle": key, "status": status, "required_hours": list(bounds[:2]), "missing_hours": missing}
+        return {"cycle": key, "required_hours": list(bounds[:2]),
+                **observe_cycle(pool, match, bounds[2])}
 
     nominal = observation(nominal_cycle)
     # Partial old cycles are not execution fallbacks even when a short subwindow is cached.
-    for key in sorted({str(c.get("cycle") or "") for c in cycles if c.get("complete")}, reverse=True):
-        if bounds_for_cycle(key) is not None and observation(key)["status"] == "ready":
+    for key in sorted({str(c.get("cycle") or "") for c in cycles if c.get("complete") is True}, reverse=True):
+        if bounds_for_cycle(key) is not None and observation(key).get("availability_status") == "present":
             cycle = key
             first, last, _ = bounds_for_cycle(key)
             break
     selected = observation(cycle)
-    coverage, missing_hours = selected["status"], selected["missing_hours"]
     iso = lambda value: value.isoformat().replace("+00:00", "Z")
     advice = {
         "time": {"value": [iso(start), iso(end)], "reason": f"优先保留用户时段或明确的 {duration} 小时需求；仅未指定时默认 24 小时。所选 {spinup_hours} 小时 spin-up 不计入用户预报时长。", "durations_hours": sorted({duration, 6, 12, 24, 48})},
@@ -154,9 +148,9 @@ def recommendations(request, health, pool=None, now=None):
                 "data_window": window, "duration_hours": duration,
                 "reason": (
                     "按当前服务时间与资料步长对齐；"
-                    + ("可复用已下载的 " if window["status"] == "ready" else "名义周期 ")
+                    + ("可复用已下载的 " if window.get("availability_status") == "present" else "名义周期 ")
                     + source.upper() + " " + window["cycle"] + "，"
-                    + {"ready": "所需时次已就绪", "needs_download": "所需时次待下载", "waiting_publish": "等待上游发布", "unknown": "资料状态尚未核验"}.get(window["status"], window["status"])
+                    + coverage_label(window)
                     + ("；最新周期 " + window["nominal_cycle"]["cycle"] + "：" + {"ready":"已就绪", "needs_download":"待下载", "waiting_publish":"等待发布", "unknown":"未核验"}.get(window["nominal_cycle"]["status"], window["nominal_cycle"]["status"]) if window["cycle"] != window["nominal_cycle"]["cycle"] else "")
                     + "。spin-up另计；实际运行前重新核验资料并按现有策略选周期。")})
         advice["time"]["candidates"] = candidates
@@ -193,7 +187,7 @@ def recommendations(request, health, pool=None, now=None):
     weighted_cells = sum(d.get("e_we",0)*d.get("e_sn",0)*factor for d,factor in zip(domains,factors)) if all(f is not None for f in factors) else None
     complete = all(request.get(key) for key in ("start_time", "end_time", "center", "domains"))
     return {"suggestions": advice, "choice_constraints": constraints, "ruleset": RULESET, "rules": configuration_rules(request, complete=complete),
-            "data_window": {"source": source, "cycle": cycle, "required_hours": [first, last], "boundary_buffer_hours": forcing_buffer, "nominal_cycle": nominal, "selection_policy": "newest_complete_covering_else_nominal", "missing_hours": missing_hours, "status": coverage, "sampled_at": pool.get("sampled_at") if pool else None},
+            "data_window": {"source": source, **selected, "required_hours": [first, last], "boundary_buffer_hours": forcing_buffer, "nominal_cycle": nominal, "selection_policy": "newest_complete_covering_else_nominal", "sampled_at": pool.get("sampled_at") if pool else None},
             "resources": {"status": health.get("status", "unknown"), "sampled_at": health.get("sampled_at"),
                           "runtime_free_gb": health.get("runtime_free_gb"), "grid_cells": cells,
                           "queue_size": health.get("queue_size"), "active_task_count": health.get("active_task_count"),

@@ -96,7 +96,7 @@ class ForecastSourceTest(unittest.TestCase):
 
     def test_public_wrf_pool_contract_has_only_forecast_sources(self):
         main = (Path(__file__).parent / "main.py").read_text(encoding="utf-8")
-        self.assertIn('"data_sources": ["gfs", "ecmwf"]', main)
+        self.assertIn('"data_sources": ["gfs", "ecmwf", "ecmwf_0p1"]', main)
         self.assertNotIn('"providers": {"gfs": gfs, "ecmwf": ec, "era5": era5}', main)
 
     def test_ec_downloader_keeps_partial_files_for_resume(self):

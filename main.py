@@ -283,7 +283,7 @@ def health(cached: bool = False) -> dict[str, Any]:
                 "min_free_gb": settings.hpc_gfs_min_free_gb,
                 "prefetch": task_manager.gfs_prefetch_status,
             },
-            "forcing": {"mode": "tx_lab_remote_pool", "data_sources": ["gfs", "ecmwf"]},
+            "forcing": {"mode": "tx_lab_remote_pool", "data_sources": ["gfs", "ecmwf", "ecmwf_0p1"]},
             "downscale": {
                 "retired": True,
                 "runner_enabled": False,
@@ -319,6 +319,7 @@ def options() -> dict[str, Any]:
                 "ecmwf_cycle_hours": [0],
                 "ecmwf_cycle_policy": "latest_covering_00z",
                 "ecmwf_product": "ecmwf-ifs-0p25",
+                "ecmwf_products": [{"source":"ecmwf", "resolution":"0.25", "product":"ecmwf-ifs-0p25"}, {"source":"ecmwf_0p1", "resolution":"0.1", "product":"ecmwf-ifs-0p1", "components":["sfc","pl"]}],
                 "ecmwf_download_mode": "tx_lab_remote_full_file",
                 "gfs_min_free_gb": settings.hpc_gfs_min_free_gb,
                 "gfs_request_interval_seconds": settings.hpc_gfs_request_interval_seconds,
@@ -365,7 +366,7 @@ def options() -> dict[str, Any]:
 
 
 @app.get("/api/wrf/forcing/{source}/cycles/{cycle}/attempts")
-def forcing_attempt_history(source: Literal['gfs','ecmwf'], cycle: str,
+def forcing_attempt_history(source: Literal['gfs','ecmwf','ecmwf_0p1'], cycle: str,
                             before: int | None = Query(None, ge=0), limit: int = Query(20, ge=1, le=100)):
     try:
         return ok(hpc_client.forcing_attempt_history(source, cycle, before, limit))
@@ -385,7 +386,7 @@ def data_status() -> dict[str, Any]:
         }
         overall = "idle"
         hpc_health = task_manager.hpc_health
-        for source in ("gfs", "ecmwf"):
+        for source in ("gfs", "ecmwf", "ecmwf_0p1"):
             target_cycles = gfs_manager.latest_cycles(
                 count=settings.hpc_gfs_retained_cycles,
                 data_source=source,
@@ -462,7 +463,8 @@ def prepare_all_forcing() -> dict[str, Any]:
     try:
         gfs = task_manager.sync_latest_gfs(cleanup_old_cycles=False)
         ec = sync_latest_remote_forcing("ecmwf").get("data") or {}
-        return ok({"providers": {"gfs": gfs, "ecmwf": ec}})
+        ec_0p1 = sync_latest_remote_forcing("ecmwf_0p1").get("data") or {}
+        return ok({"providers": {"gfs": gfs, "ecmwf": ec, "ecmwf_0p1": ec_0p1}})
     except (ValueError, HpcError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
 
@@ -496,7 +498,7 @@ def sync_latest_remote_forcing(data_source: str) -> dict[str, Any]:
     if source == "gfs":
         return sync_latest_remote_gfs()
     try:
-        result = task_manager.sync_latest_ecmwf()
+        result = task_manager.sync_latest_ecmwf(data_source=source)
         return ok({"data_source": source, **result})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -514,7 +516,7 @@ class ForcingPolicyPatch(BaseModel):
 
 class ForcingDownloadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    source: Literal["gfs", "ecmwf"]
+    source: Literal["gfs", "ecmwf", "ecmwf_0p1"]
     cycle: str = Field(min_length=10, max_length=10)
     start_hour: int = Field(ge=0, le=72)
     end_hour: int = Field(ge=0, le=72)
@@ -744,7 +746,7 @@ class TaskMetadataPatch(BaseModel):
 @app.get("/api/wrf/tasks")
 def list_tasks(request: Request, limit: int = Query(default=50, ge=1, le=200),
                search: str = Query(default="", max_length=200),
-               source: Literal["gfs", "ecmwf"] | None = None, status: str | None = None,
+               source: Literal["gfs", "ecmwf", "ecmwf_0p1"] | None = None, status: str | None = None,
                archived: bool = False, cursor: str | None = Query(default=None, max_length=1024)) -> dict[str, Any]:
     owner_sub, role = _viewer(request)
     try:

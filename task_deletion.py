@@ -21,7 +21,7 @@ from terminal_evidence import verify_waiting_restart, terminal_mode
 from deletion_queue import DeletionQueue, timings
 import directory_delete as directories
 
-TASK_ID = re.compile(r"^wrf_(?:gfs|ecmwf|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}$")
+TASK_ID = re.compile(r"^wrf_(?:gfs|ecmwf|ecmwf_0p1|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}$")
 TERMINAL = {"succeeded", "partial_success", "failed", "cancelled", "waiting_restart"}
 
 

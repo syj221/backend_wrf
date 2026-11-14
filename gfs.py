@@ -24,7 +24,7 @@ def normalize_source(data_source: str) -> str:
     source = str(data_source or "gfs").strip().lower()
     if source == "ec":
         source = "ecmwf"
-    if source not in {"gfs", "ecmwf"}:
+    if source not in {"gfs", "ecmwf", "ecmwf_0p1"}:
         raise ValueError("数据源必须是 gfs 或 ecmwf")
     return source
 

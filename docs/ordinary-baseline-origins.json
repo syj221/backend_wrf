@@ -152,9 +152,10 @@
     {
       "file": "main.py",
       "symbol": "sync_latest_remote_forcing",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "fb18067d1cf7d44d38bfe18a6152b42b01427edce986b65cdd2d8c74daa4c0c1"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree requests must retain their explicit product key when forwarding to the shared ECMWF prefetch method; existing 0.25-degree default behavior is covered by product routing regressions.",
+      "baseline_sha256": "fb18067d1cf7d44d38bfe18a6152b42b01427edce986b65cdd2d8c74daa4c0c1",
+      "compatibility_sha256": "c8e56c7dec25b08e5e1de12278a953f033c213358cefcdd8a4e4c8e76d214659"
     },
     {
       "file": "main.py",
@@ -622,8 +623,9 @@
       "file": "task_manager.py",
       "symbol": "WrfTaskManager.sync_latest_ecmwf",
       "origin": "compatibility",
-      "reason": "forcing_reference_policy_and_single_scheduler",
-      "baseline_sha256": "80a83521fdcfe3484b78df315807bb04c93d9f6b0fa8a4820eca54a75e72999d"
+      "reason": "Explicit IFS 0.1-degree product identity extension; the existing gfs/ecmwf keys and defaults are unchanged and covered by source-routing regressions.",
+      "baseline_sha256": "80a83521fdcfe3484b78df315807bb04c93d9f6b0fa8a4820eca54a75e72999d",
+      "compatibility_sha256": "47425c8d2c4e4ef9ed591be0189571cce063c6b4989b736a990a28e3f7575835"
     },
     {
       "file": "task_manager.py",
@@ -677,9 +679,10 @@
     {
       "file": "task_manager.py",
       "symbol": "WrfTaskManager.new_task_id",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "53a4d7e606c2fa53492921c199e02b38dde31a0af1dd6a0471c6a206fc732144"
+      "origin": "compatibility",
+      "reason": "Explicit IFS 0.1-degree product identity extension; the existing gfs/ecmwf keys and defaults are unchanged and covered by source-routing regressions.",
+      "baseline_sha256": "53a4d7e606c2fa53492921c199e02b38dde31a0af1dd6a0471c6a206fc732144",
+      "compatibility_sha256": "f5631b82444c95fb6fa26eaee1c071beb75855df1dd83071fd4c6f76a2367900"
     },
     {
       "file": "task_manager.py",
@@ -1293,9 +1296,10 @@
     {
       "file": "hpc.py",
       "symbol": "_write_expected_forcing_index",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "6c48f822820090405ed0e2e097163efa0e4de2339bb5a3727f54154c34c84e84"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree split product extension with resolution-specific names, paired readiness and manifest identity; original 0.25-degree paths and behavior remain covered by the forcing regressions.",
+      "baseline_sha256": "6c48f822820090405ed0e2e097163efa0e4de2339bb5a3727f54154c34c84e84",
+      "compatibility_sha256": "6ae491dc47b2acb3951504d53a873b54f247b49b158beb625218481dfa81c592"
     },
     {
       "file": "hpc.py",
@@ -1706,8 +1710,8 @@
     {
       "file": "hpc_transport.py",
       "symbol": "HpcClient._normalize_forcing_source",
-      "origin": "baseline",
-      "reason": null,
+      "origin": "compatibility",
+      "reason": "Existing shared normalize_source staticmethod alias; source normalization regressions assert both entry points use the same strict function. Historical body hash retained for provenance.",
       "baseline_sha256": "2077109f7da471717123fc379b344cb143f9b20282c56ad72411bee9e16ec617"
     },
     {
@@ -1720,9 +1724,10 @@
     {
       "file": "hpc_transport.py",
       "symbol": "HpcClient._pool_queue_state",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "34c12fde88c663de2a3e30a0070cc84e634d9deb4e2f7482974579344487b92f"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree queue and history reads reject foreign product ownership; legacy roots keep their original observation behavior.",
+      "baseline_sha256": "34c12fde88c663de2a3e30a0070cc84e634d9deb4e2f7482974579344487b92f",
+      "compatibility_sha256": "04e1bd2a36a6941b041c1e976614ab16ae802551a7ea2ce94265786f23baa8be"
     },
     {
       "file": "hpc_transport.py",
@@ -1790,9 +1795,10 @@
     {
       "file": "hpc_transport.py",
       "symbol": "HpcClient.inspect_forcing_files",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "a46523025584f1a1714dbd017e038e3cb04f3daf1a2f6ed217b8d94ed8f7b7ff"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree split product extension with resolution-specific names, paired readiness and manifest identity; original 0.25-degree paths and behavior remain covered by the forcing regressions.",
+      "baseline_sha256": "a46523025584f1a1714dbd017e038e3cb04f3daf1a2f6ed217b8d94ed8f7b7ff",
+      "compatibility_sha256": "4ae5f7afb4ce9c5fb55a467f5895b035a3187c622239c94b03d771c5be3f76b6"
     },
     {
       "file": "hpc_transport.py",
@@ -1811,9 +1817,10 @@
     {
       "file": "hpc_transport.py",
       "symbol": "HpcClient._manifest_entry_forcing",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "1961d5e2d0a5e29055cf5c095690d3ff5ac32bcda8cda40d0731180331110947"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree split product extension with resolution-specific names, paired readiness and manifest identity; original 0.25-degree paths and behavior remain covered by the forcing regressions.",
+      "baseline_sha256": "1961d5e2d0a5e29055cf5c095690d3ff5ac32bcda8cda40d0731180331110947",
+      "compatibility_sha256": "7fb7d20a83becb271ba722d69a15b1c68e7bc4379aa1eec15d6ef96c2bf12e3d"
     },
     {
       "file": "hpc_transport.py",
@@ -1979,8 +1986,8 @@
     {
       "file": "gfs.py",
       "symbol": "GfsManager.normalize_source",
-      "origin": "baseline",
-      "reason": null,
+      "origin": "compatibility",
+      "reason": "Existing shared normalize_source staticmethod alias; source normalization regressions assert both entry points use the same strict function. Historical body hash retained for provenance.",
       "baseline_sha256": "56027ff25d3d34f96861e573c3c5bd5a16d133546839f1c67c0ef36e3b068e89"
     },
     {
@@ -2084,9 +2091,10 @@
     {
       "file": "scripts/forcing_pool_queue.py",
       "symbol": "PoolQueue.expected_hours",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "91c3f64f3261d32ff3df312448e40097520d157acd902558b262846e1ffe9a3c"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree split product extension with resolution-specific names, paired readiness and manifest identity; original 0.25-degree paths and behavior remain covered by the forcing regressions.",
+      "baseline_sha256": "91c3f64f3261d32ff3df312448e40097520d157acd902558b262846e1ffe9a3c",
+      "compatibility_sha256": "bdde90df326e5a5066668abd01cd7154a3f7d2bd99f08a2a9e6ac140b5a71134"
     },
     {
       "file": "scripts/forcing_pool_queue.py",
@@ -2266,9 +2274,10 @@
     {
       "file": "scripts/forcing_pool_queue.py",
       "symbol": "PoolQueue._write_manifest_if_complete",
-      "origin": "baseline",
-      "reason": null,
-      "baseline_sha256": "06c78b9beca4741e965aca9349d25530ad29be746bab37c6202ca7efa2a3ab44"
+      "origin": "compatibility",
+      "reason": "IFS 0.1-degree split product extension with resolution-specific names, paired readiness and manifest identity; original 0.25-degree paths and behavior remain covered by the forcing regressions.",
+      "baseline_sha256": "06c78b9beca4741e965aca9349d25530ad29be746bab37c6202ca7efa2a3ab44",
+      "compatibility_sha256": "7fc0db2eff709d3bceb7a4e5ef107480444bc844a52aa3431df55bf3fe9a9dab"
     },
     {
       "file": "scripts/forcing_pool_queue.py",

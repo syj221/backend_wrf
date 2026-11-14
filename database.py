@@ -434,11 +434,11 @@ class TaskStore:
             row = self._db.execute("SELECT * FROM wrf_forcing_policy WHERE id=1").fetchone()
         if not row:
             return {"version":0,"enabled":bool(default_enabled),"auto_cleanup":False,
-                    "retained_complete_cycles":2,"held_cycles":{"gfs":[],"ecmwf":[]},"updated_at":None}
+                    "retained_complete_cycles":2,"held_cycles":{"gfs":[],"ecmwf":[],"ecmwf_0p1":[]},"updated_at":None}
         return {"version":row["version"],"enabled":bool(row["enabled"]),
                 "auto_cleanup":bool(row["auto_cleanup"]),
                 "retained_complete_cycles":row["retained_complete_cycles"],
-                "held_cycles":json.loads(row["held_cycles_json"]),"updated_at":row["updated_at"]}
+                "held_cycles":{"ecmwf_0p1":[], **json.loads(row["held_cycles_json"])},"updated_at":row["updated_at"]}
 
     def retention_approved(self, source):
         with self._lock:

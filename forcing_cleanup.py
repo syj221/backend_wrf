@@ -35,7 +35,7 @@ class ForcingCleanupService:
         targets = manager.gfs.latest_cycles(count=2,data_source=source)
         policy = self.store.forcing_policy(manager.settings.hpc_gfs_prefetch_enabled)
         protected = (set(manager.task_forcing_reference_counts(source,release_terminal=True))
-                     | self.store.forcing_download_cycles(source) | set(policy["held_cycles"][source]))
+                     | self.store.forcing_download_cycles(source) | set(policy.get("held_cycles", {}).get(source, [])))
         pool = (client or manager.hpc).forcing_pool_items(source,targets,protected)[0]
         item = next((item for item in pool.get("cycles",[]) if item["cycle"]==cycle),None)
         if not item or not item.get("cleanup_allowed"):
@@ -44,7 +44,7 @@ class ForcingCleanupService:
 
     def delete_cycle_async(self, source, cycle, actor):
         import re
-        if source not in {"gfs","ecmwf"} or not re.fullmatch(r"[0-9]{8}00",cycle):
+        if source not in {"gfs","ecmwf","ecmwf_0p1"} or not re.fullmatch(r"[0-9]{8}00",cycle):
             raise ValueError("资料源或周期格式无效")
         with self._cycle_lock:
             with self.store._lock:
@@ -144,10 +144,10 @@ class ForcingCleanupService:
                         policy_update(self.store,self.manager,self.manager.hpc,self.manager.settings,
                             version=policy["version"],enabled=True,auto_cleanup=True,
                             held_cycles=policy["held_cycles"])
-                        for source in ("gfs","ecmwf"):
+                        for source in ("gfs","ecmwf","ecmwf_0p1"):
                             self.store.approve_retention(source,operation["id"])
                     elif not policy["enabled"] or not policy["auto_cleanup"] or not all(
-                            self.store.retention_approved(source) for source in ("gfs","ecmwf")):
+                            self.store.retention_approved(source) for source in ("gfs","ecmwf","ecmwf_0p1")):
                         raise ValueError("请管理员首次刷新以启用两周期资料管理")
                     self.manager._forcing_cleanup_wakeup.set()
                     with self._refresh_lock:
@@ -174,7 +174,7 @@ class ForcingCleanupService:
             protected = set(manager.task_forcing_reference_counts(source,release_terminal=True)) | self.store.forcing_download_cycles(source)
         else:
             protected = manager.active_forcing_cycles(source)
-        protected |= set(policy["held_cycles"][source])
+        protected |= set(policy.get("held_cycles", {}).get(source, []))
         if source == "gfs":
             protected |= manager.retained_gfs_cycles()
         pool = manager.hpc.forcing_pool_items(source,targets,protected)[0]

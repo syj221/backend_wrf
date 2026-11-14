@@ -9,7 +9,10 @@ requested="${3:-}"
 intent="${4:-prefetch}"
 reference="${5:-}"
 root="${WRF_EC_DATA_ROOT:-${WRF_HPC_EC_DIR:-/home/tx-lab/.wrf-data/WRFwork/DATA/ECMWF}}"
+product_source="${WRF_EC_PRODUCT_SOURCE:-ecmwf}"
+if [[ "$product_source" != "ecmwf" && "$product_source" != "ecmwf_0p1" ]]; then exit 2; fi
 template="${WRF_EC_URL_TEMPLATE:-}"
+if [[ "$product_source" == "ecmwf_0p1" ]]; then template="${WRF_EC_0P1_URL_TEMPLATE:-}"; fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 queue_script="${script_dir}/forcing_pool_queue.py"
 storage_guard="${WRF_STORAGE_GUARD_SCRIPT:-${script_dir}/wrf_storage_guard.sh}"
@@ -31,7 +34,7 @@ wrf_require_storage >/dev/null
 mkdir -p "$root" "$root/logs"
 
 common=(
-  --source ecmwf --root "$root"
+  --source "$product_source" --root "$root"
   --min-bytes "${WRF_EC_MIN_BYTES:-1048576}"
   --min-speed "${WRF_EC_MIN_SPEED_BPS:-1024}"
   --retry-max-attempts "${WRF_POOL_RETRY_MAX_ATTEMPTS:-8}"

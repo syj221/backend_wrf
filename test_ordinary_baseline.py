@@ -27,10 +27,15 @@ class OrdinaryBaselineTest(unittest.TestCase):
         for record in manifest['definitions']:
             path = ROOT / record['file']
             source = path.read_text()
-            node = definitions(source)[record['symbol']]
             if record['origin'] == 'compatibility':
                 self.assertTrue(record['reason'], record['symbol'])
+                if record.get('compatibility_sha256'):
+                    node = definitions(source)[record['symbol']]
+                    start = min([node.lineno] + [item.lineno for item in node.decorator_list])
+                    text = ''.join(source.splitlines(True)[start - 1:node.end_lineno])
+                    self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), record['compatibility_sha256'], record['symbol'])
                 continue
+            node = definitions(source)[record['symbol']]
             decorators = node.decorator_list
             if record['origin'] == 'baseline_with_guard':
                 self.assertEqual(ast.unparse(decorators[0]), 'guard_legacy_action')

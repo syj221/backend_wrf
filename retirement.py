@@ -22,7 +22,7 @@ import uuid
 SCHEMA = "wrf-downscale-retirement-1"
 TERMINAL = {"succeeded", "failed", "cancelled"}
 DS_ID = re.compile(r"^ds_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}$")
-WRF_ID = re.compile(r"^wrf_(?:gfs|ecmwf|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}$")
+WRF_ID = re.compile(r"^wrf_(?:gfs|ecmwf|ecmwf_0p1|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}$")
 DISPLAY_STATIC_ORIGIN = "http://127.0.0.1:8002"
 
 
@@ -230,7 +230,7 @@ def remote_session_absent(proof):
 def discover_task_paths(root,identities):
     """Find every historical attempt without accepting a task-ID prefix match."""
     for identity in identities:
-        if not re.fullmatch(r"wrf_(?:gfs|ecmwf|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}",identity):
+        if not re.fullmatch(r"wrf_(?:gfs|ecmwf|ecmwf_0p1|ec)_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{8}",identity):
             raise ValueError("Invalid ordinary task identity")
     result = []
     for name in sorted(os.listdir(root)):

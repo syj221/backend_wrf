@@ -332,20 +332,24 @@ class WrfTaskManager:
         *,
         cleanup_old_cycles: bool = False,
         target_cycles: list[str] | None = None,
+        data_source: str = "ecmwf",
     ) -> dict[str, Any]:
         """预取最新 ECMWF 00Z 周期，规则与 GFS 共享池保持一致。"""
         if cleanup_old_cycles:
             raise ValueError("预取不执行删除；请使用显式资料清理入口")
         if self.gfs is None:
             raise RuntimeError("ECMWF 周期管理器未配置")
+        source = GfsManager.normalize_source(data_source)
+        if source not in {"ecmwf", "ecmwf_0p1"}:
+            raise ValueError("ECMWF product required")
         with self._gfs_sync_lock:
             selected_cycles = list(target_cycles or self.gfs.latest_cycles(
                 count=self.settings.hpc_gfs_retained_cycles,
-                data_source="ecmwf",
+                data_source=source,
             ))
-            protected_cycles = self.active_forcing_cycles("ecmwf")
+            protected_cycles = self.active_forcing_cycles(source)
             auto_cleanup = {"requested": [], "deleted": [], "missing": []}
-            pool = self.hpc.forcing_pool_items("ecmwf", selected_cycles, protected_cycles)[0]
+            pool = self.hpc.forcing_pool_items(source, selected_cycles, protected_cycles)[0]
             by_cycle = {item["cycle"]: item for item in pool.get("cycles") or []}
             actions: list[dict[str, Any]] = []
             for cycle in selected_cycles:
@@ -353,8 +357,8 @@ class WrfTaskManager:
                 if item.get("complete"):
                     actions.append({"cycle": cycle, "status": "ready", "detail": f"{item.get('total_files', 25)}/{item.get('total_files', 25)}"})
                 else:
-                    actions.append(self.hpc.trigger_forcing_download("ecmwf", cycle, 72))
-            refreshed = self.hpc.forcing_pool_items("ecmwf", selected_cycles, protected_cycles)[0]
+                    actions.append(self.hpc.trigger_forcing_download(source, cycle, 72))
+            refreshed = self.hpc.forcing_pool_items(source, selected_cycles, protected_cycles)[0]
             apply_forcing_observations(actions, refreshed)
             return {
                 "target_cycles": selected_cycles,
@@ -365,7 +369,7 @@ class WrfTaskManager:
     def _prefetch_latest_gfs_once(self) -> None:
         policy=self.store.forcing_policy(self.settings.hpc_gfs_prefetch_enabled)
         if not isinstance(policy,dict):
-            policy={"enabled":self.settings.hpc_gfs_prefetch_enabled,"auto_cleanup":False,"held_cycles":{"gfs":[],"ecmwf":[]}}
+            policy={"enabled":self.settings.hpc_gfs_prefetch_enabled,"auto_cleanup":False,"held_cycles":{"gfs":[],"ecmwf":[],"ecmwf_0p1":[]}}
         if not policy["enabled"]:
             self.set_forcing_policy(policy)
             return
@@ -396,14 +400,16 @@ class WrfTaskManager:
             )
             ec_result = self.sync_latest_ecmwf(cleanup_old_cycles=False,
                 target_cycles=self.gfs.latest_cycles(count=2,data_source="ecmwf"))
+            ec_0p1_result = self.sync_latest_ecmwf(cleanup_old_cycles=False, data_source="ecmwf_0p1",
+                target_cycles=self.gfs.latest_cycles(count=2,data_source="ecmwf_0p1"))
             if policy["auto_cleanup"]:
-                for source in ("gfs","ecmwf"):
+                for source in ("gfs","ecmwf","ecmwf_0p1"):
                     targets=self.gfs.latest_cycles(count=2,data_source=source)
                     expanded = getattr(self.store,"retention_approved",lambda _source:False)(source) is True
                     if expanded:
                         self.refresh_forcing_terminal_proofs()
                         self.hpc.expire_forcing_prefetch(source,targets)
-                    protected=self.active_forcing_cycles(source)|set(policy["held_cycles"][source])
+                    protected=self.active_forcing_cycles(source)|set(policy.get("held_cycles", {}).get(source, []))
                     pool=self.hpc.forcing_pool_items(source,targets,protected)[0]
                     # Keep both most recent complete cycles and all task/hold references.
                     if expanded or (pool.get("targets_complete") and len(pool.get("retained_complete_cycles") or [])>=2):
@@ -426,6 +432,7 @@ class WrfTaskManager:
         ] + [
             {"data_source": "ecmwf", **action} for action in ec_actions
         ]
+        actions.extend({"data_source": "ecmwf_0p1", **action} for action in ec_0p1_result.get("actions") or [])
         statuses = {str(item.get("status") or "") for item in actions}
         if actions and statuses == {"ready"}:
             status = "ready"
@@ -456,10 +463,12 @@ class WrfTaskManager:
             message=message,
             target_cycles=result.get("target_cycles") or [],
             ecmwf_target_cycles=ec_result.get("target_cycles") or [],
+            ecmwf_0p1_target_cycles=ec_0p1_result.get("target_cycles") or [],
             actions=actions,
             auto_cleanup={
                 "gfs": result.get("auto_cleanup") or {},
                 "ecmwf": ec_result.get("auto_cleanup") or {},
+                "ecmwf_0p1": ec_0p1_result.get("auto_cleanup") or {},
             },
         )
 
@@ -638,7 +647,7 @@ class WrfTaskManager:
     @staticmethod
     def new_task_id(data_source: str = "gfs", simulation_start: Any | None = None) -> str:
         source = str(data_source or "gfs").lower()
-        if source not in {"gfs", "ecmwf"}:
+        if source not in {"gfs", "ecmwf", "ecmwf_0p1"}:
             raise ValueError("数据源必须是 gfs 或 ecmwf")
         if isinstance(simulation_start, str):
             simulation_start = datetime.fromisoformat(simulation_start.replace("Z", "+00:00"))
@@ -777,7 +786,7 @@ class WrfTaskManager:
                     start = datetime.fromisoformat(request["start_time"].replace("Z", "+00:00"))
                     start -= timedelta(hours=resolve_spinup_hours(request))
                     end = datetime.fromisoformat(request["end_time"].replace("Z", "+00:00"))
-                    interval = int(request.get("forecast_interval_hours") or (3 if source == "ecmwf" else 1))
+                    interval = int(request.get("forecast_interval_hours") or (1 if source == "gfs" else 3))
                     buffer = boundary_buffer_hours(request.get("configuration_profile"))
                     cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
                     manager = GfsManager(self.settings)
@@ -829,7 +838,7 @@ class WrfTaskManager:
     def cleanup_forcing(self, source: str, paths: list[str], actor_sub: str = "system", expected_snapshots=None, _reference_guard_held=False, retention_upgrade=False, _client=None) -> dict[str, Any]:
         client=_client or self.hpc
         extra={"operation_timeout":getattr(client,"hash_timeout",120)} if _client is not None else {}
-        if not self.settings.hpc_workbench_data_root or not str(getattr(self.settings, "hpc_gfs_dir" if source == "gfs" else "hpc_ec_dir")).startswith(self.settings.hpc_workbench_data_root.rstrip("/")+"/forcing/"):
+        if not self.settings.hpc_workbench_data_root or not str(getattr(self.settings, "hpc_gfs_dir" if source == "gfs" else "hpc_ec_0p1_dir" if source == "ecmwf_0p1" else "hpc_ec_dir")).startswith(self.settings.hpc_workbench_data_root.rstrip("/")+"/forcing/"):
             raise ValueError("资料清理只允许独立普通 WRF 资料池")
         from uuid import uuid4
         audit_id = "cleanup_" + uuid4().hex
