@@ -382,10 +382,12 @@ def data_status() -> dict[str, Any]:
         pool_items: list[dict[str, Any]] = []
         status_priority = {
             "failed": 6, "error": 6, "rate_limited": 5, "downloading": 4,
+            "paused": 5, "status_unknown": 5,
             "retry_wait": 5, "queued": 3, "waiting_publish": 2, "partial": 1, "ready": 1, "idle": 0,
         }
         overall = "idle"
         hpc_health = task_manager.hpc_health
+        held_cycles = store.forcing_policy(settings.hpc_gfs_prefetch_enabled).get('held_cycles', {})
         for source in ("gfs", "ecmwf", "ecmwf_0p1"):
             target_cycles = gfs_manager.latest_cycles(
                 count=settings.hpc_gfs_retained_cycles,
@@ -398,7 +400,7 @@ def data_status() -> dict[str, Any]:
             items = hpc_client.forcing_pool_items(
                 source,
                 target_cycles,
-                active_cycles | retained_cycles,
+                active_cycles | retained_cycles | set(held_cycles.get(source, [])),
             )
             for item in items:
                 if status_priority.get(str(item.get("status")), 0) > status_priority.get(overall, 0):
@@ -410,6 +412,7 @@ def data_status() -> dict[str, Any]:
                     cycle["download_reference_count"] = download_counts.get(key, 0)
                     cycle["retained"] = key in retained_cycles
                     cycle["prefetch_target"] = key in target_cycles
+                    cycle['explicitly_held'] = key in held_cycles.get(source, [])
             pool_items.extend(items)
         return ok({
             "status": overall,

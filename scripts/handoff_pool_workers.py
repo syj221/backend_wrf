@@ -84,7 +84,7 @@ def prepare(roots, old_module, new_module):
              'new_module': new_module, 'old_sha': hashlib.sha256(Path(old_module).read_bytes()).hexdigest(),
              'new_sha': hashlib.sha256(Path(new_module).read_bytes()).hexdigest(), 'workers': []}
     for source, raw in sorted(roots.items()):
-        if source not in {'gfs', 'ecmwf'}:
+        if source not in {'gfs', 'ecmwf', 'ecmwf_0p1'}:
             raise ValueError('unknown source')
         root = Path(raw).resolve(strict=True)
         if root.name != source or root.stat().st_uid != os.getuid():
@@ -165,7 +165,8 @@ def handoff(plan, queue_module, audit, expected_digest, timeout=900):
     if digest(unsigned) != expected_digest or plan.get('digest') != expected_digest:
         raise RuntimeError('handoff digest mismatch')
     sources=[w['source'] for w in plan['workers']]
-    if sources not in [['gfs'],['ecmwf'],['ecmwf','gfs']]:
+    legacy_scopes = [['gfs'], ['ecmwf'], ['ecmwf', 'gfs']]
+    if sources not in legacy_scopes and not (sources == ['ecmwf_0p1'] and plan.get('source_transfer_fences') is True):
         raise RuntimeError('handoff requires exact approved providers')
     if plan.get('minimum_wait_seconds',0)>timeout:
         raise RuntimeError('wait budget does not cover the approved single-file limit')
@@ -221,9 +222,12 @@ def handoff(plan, queue_module, audit, expected_digest, timeout=900):
                         raise RuntimeError('pool directory identity changed; untouched')
                     if marker(root) != worker['marker']:
                         raise RuntimeError('worker marker changed; untouched')
-                    # Do not wait while holding a state lock: the active transfer
-                    # must be able to commit its result before releasing its cycle.
-                    state_guard = gates.enter_context(queue_module.exclusive(root / '.pool-queue.lock', blocking=False))
+                    # Modern callers already hold the transfer slot. A concurrent
+                    # enqueue may briefly own the state lock, but never needs the
+                    # slot. Keep the fence while it finishes instead of reopening
+                    # a window for the old worker to start another file.
+                    state_guard = gates.enter_context(queue_module.exclusive(
+                        root / '.pool-queue.lock', blocking=bool(plan.get('source_transfer_fences'))))
                     if state_guard is None:
                         continue
                     state = json.loads((root / '.pool-queue.json').read_text())

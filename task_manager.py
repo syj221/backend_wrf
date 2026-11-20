@@ -46,7 +46,7 @@ def apply_forcing_observations(actions: list[dict[str, Any]], pool: dict[str, An
         if not item:
             continue
         status = "ready" if item.get("complete") else item.get("status")
-        if status not in {"ready", "downloading", "queued", "waiting_publish", "rate_limited", "retry_wait", "failed", "error"}:
+        if status not in {"ready", "downloading", "paused", "status_unknown", "queued", "waiting_publish", "rate_limited", "retry_wait", "failed", "error"}:
             continue
         action["status"] = status
         for key in ("completed_files", "total_files", "size_bytes", "partial_size_bytes", "current_file", "download_rate_bps", "wait_reason"):
@@ -440,6 +440,12 @@ class WrfTaskManager:
         elif statuses & {"started", "running", "downloading"}:
             status = "downloading"
             message = "tx-lab 正在后台下载 GFS/ECMWF；完成后会继续检查新周期"
+        elif statuses & {"paused"}:
+            status = "paused"
+            message = "部分资料源工作器已暂停，文件和分片保留，等待安全恢复或交接"
+        elif statuses & {"status_unknown"}:
+            status = "status_unknown"
+            message = "部分资料源的传输身份或状态待核验，保留保护"
         elif statuses & {"queued"}:
             status = "queued"
             message = "资料已排队，等待下载工作器或共享传输槽"

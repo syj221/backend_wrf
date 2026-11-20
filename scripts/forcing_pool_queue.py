@@ -36,6 +36,10 @@ ECMWF_HOURS = tuple(range(0, 73, 3))
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 TRANSIENT_CURL_ERRORS = {6, 7, 18, 28, 35, 52, 56}
 LOCK_ROOT = Path("/tmp") / f"wrf-forcing-locks-{os.getuid()}"
+ECMWF_PORTAL = "https://data.ecmwf.int/forecasts"
+ECMWF_CLOUDFRONT = "https://d2zvc0wgha4k2l.cloudfront.net"
+NOAA_NOMADS = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
+NOAA_AWS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 
 
 def utc_now() -> str:
@@ -339,14 +343,64 @@ class PoolQueue:
         date, init = cycle[:8], cycle[8:]
         if self.source == "gfs":
             return (
-                f"https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
+                f"{NOAA_NOMADS}/"
                 f"gfs.{date}/{init}/atmos/gfs.t{init}z.pgrb2.0p25.f{hour:03d}"
             )
         template = self.args.ec_template
         if template:
             return (template.replace("{cycle}", cycle).replace("{fh}", f"{hour:03d}")
                     .replace("{date}", date).replace("{hour}", init).replace("{step}", str(hour)))
-        return f"https://data.ecmwf.int/forecasts/{date}/{init}z/ifs/0p25/oper/{date}{init}0000-{hour}h-oper-fc.grib2"
+        return f"{ECMWF_PORTAL}/{date}/{init}z/ifs/0p25/oper/{date}{init}0000-{hour}h-oper-fc.grib2"
+
+    def transfer_routes(self, cycle, hour):
+        """Return the legacy route and the ordered routes for a fresh object."""
+        original = self.url(cycle, hour)
+        if self.source == "gfs":
+            return "nomads", [("nomads", original), ("noaa_aws", NOAA_AWS + original[len(NOAA_NOMADS):])]
+        if self.args.ec_template:
+            return "custom", [("custom", original)]
+        return "ecmwf_portal", [
+            ("ecmwf_cloudfront", ECMWF_CLOUDFRONT + original[len(ECMWF_PORTAL):]),
+            ("ecmwf_portal", original),
+        ]
+
+    def transfer_file(self, cycle, hour, command, entry, before, **kwargs):
+        legacy, routes = self.transfer_routes(cycle, hour)
+        if before:
+            origin = entry.get("transfer_node") or legacy
+            pin = entry.get("transfer_url_sha256")
+            routes = [(node, url) for node, url in routes if node == origin
+                      and (not pin or hashlib.sha256(url.encode()).hexdigest() == pin)]
+            if not routes:
+                raise OSError("Partial transfer origin no longer matches its configured source")
+        deadline = time.monotonic() + float(command[command.index("--max-time") + 1])
+        output = Path(command[command.index("--output") + 1])
+        headers = Path(command[command.index("--dump-header") + 1])
+        result = None
+        for node, url in routes:
+            remaining = deadline - time.monotonic()
+            if result is not None and remaining < 1:
+                break
+            attempt = list(command)
+            attempt[-1] = url
+            attempt[attempt.index("--max-time") + 1] = str(max(1, int(remaining)))
+            attempt[attempt.index("--connect-timeout") + 1] = str(min(30, max(1, int(remaining))))
+            # Persist the origin before starting curl, including after a zero-byte failover.
+            self._set_entry(cycle, hour, {"status": "downloading", "transfer_node": node,
+                "transfer_url_sha256": hashlib.sha256(url.encode()).hexdigest()})
+            self._attempt_context["transfer_node"] = node
+            try:
+                headers.unlink()
+            except FileNotFoundError:
+                pass
+            result = self.run_curl(attempt, **kwargs)
+            status = self.response_status(headers, result)
+            if before or (output.exists() and output.stat().st_size):
+                break
+            if not (result.returncode in TRANSIENT_CURL_ERRORS
+                    or result.returncode == 22 and status in {403, 404, 408, 425, 500, 502, 503, 504}):
+                break
+        return result
 
     def enqueue(self, cycle: str, hours: List[int], priority: str, reference=None) -> None:
         cycle = safe_cycle(cycle)
@@ -602,6 +656,8 @@ class PoolQueue:
         budget = float(command[command.index('--max-time')+1])
         record = {'id':context['id'], 'request':context['request'], 'event':'request_start',
                   'started_at':utc_now(), 'bytes_before':before, 'budget_seconds':budget}
+        if context.get('transfer_node'):
+            record['transfer_node'] = context['transfer_node']
         self.record_attempt(context['cycle'], record)
         try:
             result = subprocess.run(command, **kwargs)
@@ -612,7 +668,7 @@ class PoolQueue:
             raise
         elapsed = time.monotonic()-start
         headers = Path(str(output)+'.headers')
-        status = self._http_status(headers)
+        status = self.response_status(headers, result)
         error = result.stderr or ''
         after = output.stat().st_size if output.exists() else 0
         self.record_attempt(context['cycle'], dict(record, event='request_finish', finished_at=utc_now(),
@@ -655,23 +711,36 @@ class PoolQueue:
                 break
         return result
 
+    def probe_routes(self, probe, routes):
+        error = ""
+        for _, url in routes:
+            command = ["curl", "--fail", "--location", "--range", "0-16383", "--max-filesize", "16384",
+                       "--connect-timeout", "10", "--max-time", "30", "--silent", "--show-error",
+                       "--output", str(probe), url]
+            result = self.run_curl(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   universal_newlines=True, check=False, pass_fds=self.worker_fds)
+            try:
+                with probe.open("rb") as stream:
+                    if result.returncode == 0 and stream.read(4) == b"GRIB":
+                        return True, ""
+            except FileNotFoundError:
+                pass
+            finally:
+                try:
+                    probe.unlink()
+                except FileNotFoundError:
+                    pass
+            error = (result.stderr or "").strip()[-240:] or error
+        return False, error
+
     def probe_published(self, cycle: str) -> bool:
         """Probe f072 before spending bandwidth on low-priority bulk prefetch."""
         probe = self.root / f".publish-probe-{cycle}.part"
-        command = ["curl", "--fail", "--location", "--range", "0-16383", "--connect-timeout", "20", "--max-time", "45", "--silent", "--show-error", "--output", str(probe), self.url(cycle, 72)]
-        result = self.run_curl(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
-        try:
-            available = result.returncode == 0 and probe.read_bytes().startswith(b"GRIB")
-        except OSError:
-            available = False
-        try:
-            probe.unlink()
-        except FileNotFoundError:
-            pass
+        available, error = self.probe_routes(probe, self.transfer_routes(cycle, 72)[1])
         if available:
             self._mark_publication(cycle, "published")
             return True
-        self._mark_publication(cycle, "waiting_publish", epoch_now() + self.args.publish_probe_seconds, result.stderr.strip()[-240:] or "f072 尚未发布")
+        self._mark_publication(cycle, "waiting_publish", epoch_now() + self.args.publish_probe_seconds, error or "f072 尚未发布")
         return False
 
     def _pick_next(self) -> Optional[Tuple[str, int]]:
@@ -762,6 +831,18 @@ class PoolQueue:
         except (OSError, ValueError):
             return 0
 
+    def response_status(self, headers, result):
+        # Older curl may leave an empty header dump on --fail.
+        stats = str(result.stdout or "").split()
+        if len(stats) == 2 and re.fullmatch(r"[1-5][0-9]{2}", stats[1]):
+            return int(stats[1])
+        status = self._http_status(headers)
+        if not status and result.returncode == 22:
+            match = re.search(r"requested URL returned error:\s*([45][0-9]{2})", result.stderr or "", re.I)
+            if match:
+                return int(match[1])
+        return status
+
     def _download_one(self, cycle: str, hour: int) -> None:
         # Each provider has its own inherited slot; worker/cycle gates remain shared
         # with legacy workers. A surviving curl retains its provider slot.
@@ -819,17 +900,19 @@ class PoolQueue:
             state["cycles"][cycle]["active_file"] = self.file_name(hour)
             state["cycles"][cycle]["updated_at"] = utc_now()
             self.save_state(state)
-        command = ["curl", "--fail", "--location", "--continue-at", "-", "--connect-timeout", "30", "--max-time", "3600", "--speed-time", "120", "--speed-limit", str(self.args.min_speed), "--dump-header", str(headers), "--output", str(part), "--write-out", "%{speed_download}", self.url(cycle, hour)]
+        command = ["curl", "--fail", "--location", "--continue-at", "-", "--connect-timeout", "30", "--max-time", "3600", "--speed-time", "120", "--speed-limit", str(self.args.min_speed), "--dump-header", str(headers), "--output", str(part), "--write-out", "%{speed_download} %{http_code}", self.url(cycle, hour)]
         command_error = ""
         self._attempt_context = {'id':attempt_id, 'cycle':cycle, 'request':0}
         try:
-            result = self.run_curl(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
+            result = self.transfer_file(cycle, hour, command, entry, before,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False, pass_fds=self.worker_fds)
         except OSError as exc:
             result = None
             command_error = f"download command failed: {exc}"
         finally:
             self._attempt_context = None
-        speed = int(float(result.stdout.strip() or 0)) if result is not None and result.stdout.strip().replace(".", "", 1).isdigit() else 0
+        speed_value = ((result.stdout or "").split() or [""])[0] if result is not None else ""
+        speed = int(float(speed_value)) if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", speed_value) else 0
         if result is not None and result.returncode == 0 and self.valid(part):
             os.replace(part, output)
             try:
@@ -842,7 +925,7 @@ class PoolQueue:
             self._set_entry(cycle, hour, {"status": "ready", "bytes": output.stat().st_size, "sha256": self.digest(output), "download_rate_bps": speed, "retry_at": 0, "no_progress_attempts": 0, "error": None, "failure_class": "", "failed_at": 0, "retryable": False, "terminal_retry_at": 0})
             return
         after = part.stat().st_size if part.exists() else 0
-        status = self._http_status(headers) if result is not None else 0
+        status = self.response_status(headers, result) if result is not None else 0
         if command_error:
             error = command_error[-240:]
         elif result is not None and result.returncode == 0:
@@ -1057,8 +1140,16 @@ class SplitEcmwfQueue(PoolQueue):
             return (self.args.ec_template.replace('{levtype}',component).replace('{cycle}',cycle)
                     .replace('{date}',cycle[:8]).replace('{hour}',cycle[8:])
                     .replace('{fh}',f'{hour:03d}').replace('{step}',str(hour)))
-        return (f'https://data.ecmwf.int/forecasts/{cycle[:8]}/{cycle[8:]}z/ifs/0p1/oper/'
+        return (f'{ECMWF_PORTAL}/{cycle[:8]}/{cycle[8:]}z/ifs/0p1/oper/'
                 f'{cycle}0000-{hour}h-oper-fc-{component}.grib2')
+
+    def component_routes(self, cycle, hour, component):
+        original = self.component_url(cycle, hour, component)
+        if self.args.ec_template:
+            return "custom", [("custom", original)]
+        portal = ("ecmwf_portal", original)
+        mirror = ("ecmwf_cloudfront", ECMWF_CLOUDFRONT + original[len(ECMWF_PORTAL):])
+        return "ecmwf_portal", [portal, mirror] if component == "sfc" else [mirror, portal]
 
     def url(self, cycle, hour):
         return self.component_url(cycle,hour,'sfc')
@@ -1070,18 +1161,10 @@ class SplitEcmwfQueue(PoolQueue):
     def probe_published(self, cycle):
         for component in ('sfc','pl'):
             path=self.root/f'.publish-probe-{cycle}-{component}.part'
-            command=['curl','--fail','--location','--range','0-16383','--connect-timeout','20',
-                     '--max-time','45','--silent','--show-error','--output',str(path),
-                     self.component_url(cycle,72,component)]
-            result=self.run_curl(command,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
-                                 universal_newlines=True,check=False,pass_fds=self.worker_fds)
-            try:available=result.returncode==0 and path.read_bytes().startswith(b'GRIB')
-            except OSError:available=False
-            try:path.unlink()
-            except FileNotFoundError:pass
+            available, error = self.probe_routes(path, self.component_routes(cycle, 72, component)[1])
             if not available:
                 self._mark_publication(cycle,'waiting_publish',epoch_now()+self.args.publish_probe_seconds,
-                                       result.stderr.strip()[-200:] or f'0p1 f072 {component} 尚未发布')
+                                       error or f'0p1 f072 {component} 尚未发布')
                 return False
         self._mark_publication(cycle,'published')
         return True
@@ -1160,6 +1243,9 @@ class _EcmwfComponentQueue(PoolQueue):
     def file_name(self,hour):return self.parent.component_name(hour,self.component)
 
     def file_path(self,cycle,hour):return self.parent.root/cycle/self.file_name(hour)
+
+    def transfer_routes(self, cycle, hour):
+        return self.parent.component_routes(cycle, hour, self.component)
 
     def record_attempt(self,cycle,event):
         return self.parent.record_attempt(self.logical_cycle,dict(event,component=self.component))

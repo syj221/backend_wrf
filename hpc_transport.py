@@ -1766,10 +1766,15 @@ else:
         fields = {'id','file','attempt','started_at','finished_at','status','offset','bytes_before','bytes_after',
                   'execution_seconds','budget_seconds','min_speed_bps','low_speed_seconds','cause','curl_code',
                   'http_status','next_retry_at','request','origin','component'}
+        def history_fields(row):
+            projected = {k:v for k,v in row.items() if k in fields}
+            if row.get('transfer_node') in ('nomads', 'noaa_aws', 'ecmwf_portal', 'ecmwf_cloudfront', 'custom'):
+                projected['transfer_node'] = row['transfer_node']
+            return projected
         items = []
         for row in value.get('items',[]):
-            item = {k:v for k,v in row.items() if k in fields}
-            item['requests'] = [{k:v for k,v in r.items() if k in fields} for r in row.get('requests',[])]
+            item = history_fields(row)
+            item['requests'] = [history_fields(r) for r in row.get('requests',[])]
             items.append(item)
         return {'items':items,'next_cursor':value.get('next_cursor'),
                 'legacy_unrecorded':bool(value.get('legacy_unrecorded')),
@@ -1777,11 +1782,9 @@ else:
 
     def _pool_queue_state(self, root: str) -> dict[str, Any]:
         """Read lightweight remote queue telemetry without scanning GRIB data."""
-        raw = self.run(
-            f"if test -s {self._quote_remote(f'{root}/.pool-queue.json')}; then "
-            f"cat {self._quote_remote(f'{root}/.pool-queue.json')}; else printf '{{}}'; fi",
-            timeout=60,
-        )
+        program = Path(__file__).with_name('pool_observation.py').read_text()
+        program += '\nprint(json.dumps(read_pool(' + repr(root) + ')))\n'
+        raw = self.run('python3 -B -c ' + shlex.quote(program), timeout=60)
         try:
             state = json.loads(raw or "{}")
         except json.JSONDecodeError:
@@ -1831,6 +1834,18 @@ else:
         else:
             queue_status = ""
         current = next((entry for entry in entries if entry.get("status") == "downloading"), None)
+        worker = state.get('_worker') or {}
+        worker_state = worker.get('state')
+        transfer = next((row for row in worker.get('transfers', [])
+                         if row.get('cycle') == cycle and current
+                         and row.get('file') == (current.get('current_file') or item.get('active_file'))), None)
+        if current and worker_state:
+            if transfer and transfer.get('state') in {'T', 't'}:
+                queue_status = 'paused'
+            elif worker_state == 'paused':
+                queue_status = 'paused'
+            elif worker_state == 'unknown' or not transfer:
+                queue_status = 'status_unknown'
         retry_entries = [entry for entry in entries if int(entry.get("retry_at") or 0) > now]
         terminal_retry_entries = [
             entry for entry in failed_entries if int(entry.get("terminal_retry_at") or 0) > now
@@ -1848,12 +1863,20 @@ else:
         )
         failure_class = str((latest_failure or {}).get("failure_class") or "")
         wait_reason = ""
-        if queue_status == "queued":
+        if queue_status == 'paused':
+            wait_reason = '本源下载进程已暂停，文件和分片保留；等待安全恢复或交接'
+        elif queue_status == 'status_unknown':
+            wait_reason = '当前传输身份或状态尚未确认，保留文件和锁保护；等待重新核验'
+        elif queue_status == "queued":
             active = next(((key, entry) for key, value in state.get("cycles", {}).items()
                            for entry in (value.get("files") or {}).values()
                            if isinstance(entry, dict) and entry.get("status") == "downloading"), None)
             code = item.get("wait_code") if now - int(item.get("wait_observed_at") or 0) < 30 else ""
-            if active:
+            if worker_state == 'paused':
+                wait_reason = '本源工作器已暂停，旧文件和分片保留；等待安全恢复或交接'
+            elif worker_state == 'unknown' and active:
+                wait_reason = '本源旧传输状态待核验，保留锁保护；等待确认工作器状态'
+            elif active:
                 wait_reason = f"等待本源下载完成：{active[0]} · {active[1].get('current_file') or '当前文件'}"
             elif code == "cycle_busy":
                 wait_reason = "等待本周期操作释放周期锁（下载或清理保护）"
@@ -1872,9 +1895,10 @@ else:
         return {
             "queue_status": queue_status,
             "publication_status": str(item.get("publication") or ""),
+            "worker_state": worker_state or 'unobserved',
             "wait_reason": publication_wait if queue_status=="waiting_publish" else wait_reason,
             "current_file": (current or {}).get("current_file") or (item.get("active_file") if current else None),
-            "download_rate_bps": int((current or {}).get("download_rate_bps") or 0),
+            "download_rate_bps": int((current or {}).get("download_rate_bps") or 0) if queue_status == 'downloading' else 0,
             "retry_count": max((int(entry.get("attempts") or 0) for entry in entries), default=0),
             "retry_at": min((int(entry.get("retry_at") or 0) for entry in retry_entries), default=0),
             "next_retry_at": min(
@@ -2130,7 +2154,7 @@ for hour in HOURS:
         files = item.get("files") or {}
         selected = {f"{hour:03d}": files[f"{hour:03d}"] for hour in forecast_hours
                     if isinstance(files.get(f"{hour:03d}"), dict)}
-        details = self._queue_cycle_details({"cycles": {cycle: {**item, "files": selected}}}, cycle)
+        details = self._queue_cycle_details({**state, "cycles": {**state.get("cycles", {}), cycle: {**item, "files": selected}}}, cycle)
         statuses = {entry.get("status") for entry in selected.values()}
         status = details.get("queue_status") or "unknown"
         if statuses and statuses <= {"ready", "queued"} and "queued" in statuses:
@@ -2364,7 +2388,7 @@ for hour in HOURS:
             if status != "ready" and queue_details.get("queue_status") not in {None, "", "ready"}:
                 effective_status = str(queue_details["queue_status"])
             if (
-                effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
+                effective_status not in {"ready", "downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish", "retry_wait"}
                 and self._is_terminal_pool_message(download_message)
             ):
                 effective_status = "error"
@@ -2429,7 +2453,7 @@ for hour in HOURS:
                 not item["target"]
                 and not item["protected"]
                 and not item["retained_complete"]
-                and item["status"] not in {"downloading", "queued", "rate_limited", "waiting_publish"}
+                and item["status"] not in {"downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish"}
                 and item["remote_path"]
             )
             item["immediate_cleanup_allowed"] = bool(
@@ -2445,7 +2469,7 @@ for hour in HOURS:
             elif item["retained_complete"]:
                 item["cleanup_state"] = "protected"
                 item["cleanup_reason"] = "complete_fallback_window"
-            elif item["status"] in {"downloading", "queued", "rate_limited", "waiting_publish"}:
+            elif item["status"] in {"downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish"}:
                 item["cleanup_state"] = "active"
                 item["cleanup_reason"] = "download_in_progress"
             elif item["immediate_cleanup_allowed"]:
@@ -2465,6 +2489,10 @@ for hour in HOURS:
             overall = "rate_limited"
         elif any(item["status"] == "downloading" for item in cycles):
             overall = "downloading"
+        elif any(item["status"] == "paused" for item in cycles):
+            overall = "paused"
+        elif any(item["status"] == "status_unknown" for item in cycles):
+            overall = "status_unknown"
         elif any(item["status"] == "queued" for item in cycles):
             overall = "queued"
         elif any(item["status"] == "waiting_publish" for item in cycles):
@@ -2571,7 +2599,7 @@ for hour in HOURS:
             if status != "ready" and queue_details.get("queue_status") not in {None, "", "ready"}:
                 effective_status = str(queue_details["queue_status"])
             if (
-                effective_status not in {"ready", "downloading", "queued", "rate_limited", "waiting_publish", "retry_wait"}
+                effective_status not in {"ready", "downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish", "retry_wait"}
                 and self._is_terminal_pool_message(download_message)
             ):
                 effective_status = "error"
@@ -2633,7 +2661,7 @@ for hour in HOURS:
             item["cleanup_allowed"] = bool(
                 not item["target"] and not item["protected"]
                 and not item["retained_complete"]
-                and item["status"] not in {"downloading", "queued", "rate_limited", "waiting_publish"}
+                and item["status"] not in {"downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish"}
                 and item["remote_path"]
             )
             item["immediate_cleanup_allowed"] = bool(
@@ -2649,7 +2677,7 @@ for hour in HOURS:
             elif item["retained_complete"]:
                 item["cleanup_state"] = "protected"
                 item["cleanup_reason"] = "complete_fallback_window"
-            elif item["status"] in {"downloading", "queued", "rate_limited", "waiting_publish"}:
+            elif item["status"] in {"downloading", "paused", "status_unknown", "queued", "rate_limited", "waiting_publish"}:
                 item["cleanup_state"] = "active"
                 item["cleanup_reason"] = "download_in_progress"
             elif item["immediate_cleanup_allowed"]:
@@ -2669,6 +2697,10 @@ for hour in HOURS:
             overall = "rate_limited"
         elif any(item["status"] == "downloading" for item in cycles):
             overall = "downloading"
+        elif any(item["status"] == "paused" for item in cycles):
+            overall = "paused"
+        elif any(item["status"] == "status_unknown" for item in cycles):
+            overall = "status_unknown"
         elif any(item["status"] == "queued" for item in cycles):
             overall = "queued"
         elif any(item["status"] == "waiting_publish" for item in cycles):
